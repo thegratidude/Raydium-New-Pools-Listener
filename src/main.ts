@@ -1,16 +1,21 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { startConnection } from './scripts/new-raydium-pools/listener';
-
 import { Connection, PublicKey } from '@solana/web3.js';
+import * as dotenv from 'dotenv';
+
+// Load environment variables
+dotenv.config();
 
 export const RAYDIUM_PUBLIC_KEY =
   '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8';
 
-export const HTTP_URL =
-  'https://mainnet.helius-rpc.com/?api-key=HELIUS_API_KEY';
+if (!process.env.HTTP_URL || !process.env.WSS_URL) {
+  throw new Error('HTTP_URL and WSS_URL must be defined in .env file');
+}
 
-export const WSS_URL = 'wss://mainnet.helius-rpc.com/?api-key=HELIUS_API_KEY';
+export const HTTP_URL = process.env.HTTP_URL;
+export const WSS_URL = process.env.WSS_URL;
 
 export const RAYDIUM = new PublicKey(RAYDIUM_PUBLIC_KEY);
 
@@ -33,7 +38,7 @@ async function bootstrap() {
 
   app.enableCors(corsOptions);
 
-  await app.listen(5000);
+  await app.listen(5001);
   await startConnection(rpcConnection, RAYDIUM, INSTRUCTION_NAME);
 }
 
