@@ -20,10 +20,18 @@ export interface PoolAnalysis {
   tvl: number;
   volume24h: number;
   feeRate: number;
+  priceImpact: number;
   isViable: boolean;
   reason?: string;
 }
 
+/**
+ * Analyzes a Raydium pool for trading viability.
+ * Thresholds are optimized for small trades (≤1 SOL):
+ * - TVL > $45K (lower than common $50K to catch edge cases)
+ * - 24h Volume > $5K (suitable for new pools)
+ * - Price Impact < 2% for 1 SOL trade
+ */
 export async function analyzePool(poolAddress: string): Promise<PoolAnalysis> {
   if (!process.env.HTTP_URL) {
     throw new Error('HTTP_URL must be defined in .env file');
@@ -40,65 +48,89 @@ export async function analyzePool(poolAddress: string): Promise<PoolAnalysis> {
   try {
     const poolInfo = await api.fetchPoolById({ ids: poolAddress });
     
-    if (!Array.isArray(poolInfo) || poolInfo.length === 0) {
-      return {
-        poolAddress,
-        tokenA: { symbol: '', address: '', amount: 0 },
-        tokenB: { symbol: '', address: '', amount: 0 },
-        price: 0,
-        tvl: 0,
-        volume24h: 0,
-        feeRate: 0,
-        isViable: false,
-        reason: 'Pool not found'
-      };
+    // Check if we got valid pool data
+    if (!Array.isArray(poolInfo) || poolInfo.length === 0 || !poolInfo[0]) {
+      throw new Error('Pool not found or not yet indexed');
     }
 
     const pool = poolInfo[0];
     
+    // Validate required pool data
+    if (!pool.mintA || !pool.mintB) {
+      throw new Error('Pool token data not available');
+    }
+
     // Extract pool data
     const tokenA = {
-      symbol: pool.mintA.symbol,
+      symbol: pool.mintA.symbol || 'Unknown',
       address: pool.mintA.address,
-      amount: pool.mintAmountA
+      amount: pool.mintAmountA || 0
     };
     
     const tokenB = {
-      symbol: pool.mintB.symbol,
+      symbol: pool.mintB.symbol || 'Unknown',
       address: pool.mintB.address,
-      amount: pool.mintAmountB
+      amount: pool.mintAmountB || 0
     };
 
-    // Calculate viability based on:
-    // 1. TVL > $100k
-    // 2. 24h volume > $10k
-    // 3. Price impact < 1% for $1k trade
-    const tvl = pool.tvl;
-    const volume24h = pool.day.volume;
-    const feeRate = pool.feeRate;
+    // Get pool metrics
+    const tvl = pool.tvl || 0;
+    const volume24h = pool.day?.volume || 0;
+    const feeRate = pool.feeRate || 0;
+    const price = pool.price || 0;
+
+    // Calculate price impact for 1 SOL worth of tokens
+    // First determine which token is SOL/WSOL
+    const isTokenASol = tokenA.symbol === 'WSOL' || tokenA.symbol === 'SOL';
+    const isTokenBSol = tokenB.symbol === 'WSOL' || tokenB.symbol === 'SOL';
     
-    // Calculate price impact for $1k trade
-    // This is a simplified calculation - in reality you'd need to use the actual AMM formula
-    const priceImpact = (1000 / tvl) * 100; // Simple percentage of TVL
+    let solAmount: number;
+    let otherTokenAmount: number;
+    let isSolTokenA: boolean;
+
+    if (isTokenASol) {
+      solAmount = tokenA.amount;
+      otherTokenAmount = tokenB.amount;
+      isSolTokenA = true;
+    } else if (isTokenBSol) {
+      solAmount = tokenB.amount;
+      otherTokenAmount = tokenA.amount;
+      isSolTokenA = false;
+    } else {
+      // If neither token is SOL, we can't calculate price impact
+      throw new Error('Pool does not contain SOL/WSOL');
+    }
+
+    // Calculate price impact for 1 SOL
+    // Using constant product formula: (x * y = k)
+    // Impact = (1 / (solAmount + 1)) * 100
+    const priceImpact = (1 / (solAmount + 1)) * 100;
     
-    const isViable = tvl > 100000 && volume24h > 10000 && priceImpact < 1;
+    // A pool is viable if:
+    // 1. TVL > $45k (optimized for small trades, catching edge cases below common $50k threshold)
+    // 2. 24h volume > $5k (suitable for new pools)
+    // 3. Price impact < 2% for 1 SOL trade
+    const isViable = tvl > 45000 && volume24h > 5000 && priceImpact < 2;
     
     return {
       poolAddress,
       tokenA,
       tokenB,
-      price: pool.price,
+      price,
       tvl,
       volume24h,
       feeRate,
+      priceImpact,
       isViable,
       reason: isViable ? undefined : 
-        tvl <= 100000 ? 'TVL too low' :
-        volume24h <= 10000 ? '24h volume too low' :
-        priceImpact >= 1 ? 'Price impact too high' : undefined
+        tvl <= 45000 ? 'TVL too low (needs >$45K for small trades)' :
+        volume24h <= 5000 ? '24h volume too low (needs >$5K for new pools)' :
+        priceImpact >= 2 ? 'Price impact too high (needs <2% for 1 SOL trade)' : undefined
     };
   } catch (error) {
-    console.error('Error analyzing pool:', error);
+    if (error instanceof Error) {
+      throw new Error(`Failed to analyze pool: ${error.message}`);
+    }
     throw error;
   }
 }

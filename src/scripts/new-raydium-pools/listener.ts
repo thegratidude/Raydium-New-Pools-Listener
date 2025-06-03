@@ -8,6 +8,7 @@ import {
 import { RAYDIUM_PUBLIC_KEY } from 'src/main';
 import { sleep } from 'src/utils/sleep';
 import { liuquidityPoolIndex, quoteIndex, tokenMintIndex } from './constants';
+import { getPoolMonitor } from './pool-monitor';
 
 let txnSignature = '';
 
@@ -17,7 +18,7 @@ function isPartiallyDecodedInstruction(
   return (instruction as PartiallyDecodedInstruction).accounts !== undefined;
 }
 
-// Fetch raydium mints
+// Fetch raydium mints and add to pool monitor
 async function fetchRaydiumMints(txId: string, connection: Connection) {
   try {
     const tx = await connection.getParsedTransaction(txId, {
@@ -50,8 +51,6 @@ async function fetchRaydiumMints(txId: string, connection: Connection) {
     ) {
       const accounts = raydiumInstruction.accounts as PublicKey[];
 
-      // Logger.log('accounts', accounts);
-
       // Token A mint
       let tokenAAccount = accounts[tokenMintIndex];
 
@@ -72,10 +71,18 @@ async function fetchRaydiumMints(txId: string, connection: Connection) {
         accounts[liuquidityPoolIndex]?.toBase58();
 
       Logger.log('token mint address', tokenAAccount);
-
       Logger.log('quote address', tokenBAccount);
-
       Logger.log('liquidity pool address', liquidityPoolAddressAccount);
+
+      // Add pool to monitor if we have all required addresses
+      if (liquidityPoolAddressAccount) {
+        const monitor = getPoolMonitor(connection);
+        await monitor.addPool(
+          liquidityPoolAddressAccount,
+          tokenAAccount.toBase58(),
+          tokenBAccount.toBase58()
+        );
+      }
     }
   } catch (error) {
     Logger.log('error', error);
