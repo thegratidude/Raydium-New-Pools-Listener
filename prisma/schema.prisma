@@ -1,0 +1,111 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Represents a Raydium pool
+model Pool {
+  id            String    @id @default(cuid())
+  address       String    @unique
+  tokenA        String    // Token A mint address
+  tokenB        String    // Token B mint address
+  tokenASymbol  String
+  tokenBSymbol  String
+  createdAt     DateTime  @default(now())
+  isActive      Boolean   @default(true)
+  lastUpdated   DateTime  @updatedAt
+
+  // Relations
+  states        PoolState[]
+  trades        Trade[]
+  statusChanges PoolStatusChange[]
+
+  // Current metrics (for quick access)
+  currentPrice  Float?
+  currentTvl    Float?
+  currentVolume Float?
+  feeRate       Float?
+
+  @@index([address])
+  @@index([isActive])
+}
+
+// Historical pool states (snapshots every 5 minutes)
+model PoolState {
+  id            String    @id @default(cuid())
+  poolId        String
+  timestamp     DateTime  @default(now())
+  price         Float
+  tvl           Float
+  volume24h     Float
+  baseReserve   Float
+  quoteReserve  Float
+  volumeChange  Float     // 24h volume change
+  priceChange   Float     // Price change since last snapshot
+  slippage1Sol  Float     // Slippage for 1 SOL trade
+
+  // Relations
+  pool          Pool      @relation(fields: [poolId], references: [id])
+
+  @@index([poolId, timestamp])
+  @@index([timestamp])
+}
+
+// Individual trades
+model Trade {
+  id            String    @id @default(cuid())
+  poolId        String
+  timestamp     DateTime  @default(now())
+  tokenIn       String    // Token mint address
+  tokenOut      String    // Token mint address
+  amountIn      Float
+  amountOut     Float
+  priceImpact   Float
+  type          String    // "buy" or "sell"
+
+  // Relations
+  pool          Pool      @relation(fields: [poolId], references: [id])
+
+  @@index([poolId, timestamp])
+  @@index([timestamp])
+}
+
+// Pool status changes (active/inactive transitions)
+model PoolStatusChange {
+  id            String    @id @default(cuid())
+  poolId        String
+  timestamp     DateTime  @default(now())
+  previousState Boolean
+  newState      Boolean
+  reason        String    // Why the status changed
+
+  // Relations
+  pool          Pool      @relation(fields: [poolId], references: [id])
+
+  @@index([poolId, timestamp])
+}
+
+// Trend indicators (calculated periodically)
+model TrendIndicator {
+  id            String    @id @default(cuid())
+  poolId        String
+  timestamp     DateTime  @default(now())
+  type          String    // "liquidity", "volume", "price"
+  value         Float
+  direction     String    // "up", "down", "stable"
+  confidence    Float     // 0-1 confidence score
+  description   String    // Human-readable trend description
+
+  @@index([poolId, timestamp, type])
+}

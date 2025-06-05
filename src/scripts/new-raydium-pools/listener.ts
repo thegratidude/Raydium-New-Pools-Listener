@@ -12,6 +12,13 @@ import { getPoolMonitor } from './pool-monitor';
 
 let txnSignature = '';
 
+// Health check: count messages seen
+let messageCount = 0;
+setInterval(() => {
+  console.log(`🩺 Health check: ${messageCount} messages seen in the last minute`);
+  messageCount = 0;
+}, 60_000);
+
 function isPartiallyDecodedInstruction(
   instruction: ParsedInstruction | PartiallyDecodedInstruction,
 ): instruction is PartiallyDecodedInstruction {
@@ -99,6 +106,9 @@ export async function startConnection(
     programAddress,
     ({ logs, err, signature }) => {
       if (err) return;
+
+      // Increment message count for every log event
+      messageCount++;
 
       if (logs && logs.some((log) => log.includes(searchInstruction))) {
         console.log(
