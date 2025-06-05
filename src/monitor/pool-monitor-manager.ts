@@ -19,7 +19,7 @@ export class PoolMonitorManager {
     this.historyLength = options.historyLength || 50;
   }
 
-  addPool(pool: PoolDiscoveryResult, tokenA: { symbol: string; decimals: number; mint: string; }, tokenB: { symbol: string; decimals: number; mint: string; }, onUpdate: (snapshot: PoolSnapshot, pressure: MarketPressure) => void) {
+  addPool(pool: PoolDiscoveryResult, tokenA: { symbol: string; decimals: number; mint: string; }, tokenB: { symbol: string; decimals: number; mint: string; }, onUpdate: (snapshot: PoolSnapshot, pressure: MarketPressure, originPrice: number | null, originBaseReserve: number | null, originQuoteReserve: number | null, prevSnapshot: any) => void) {
     if (this.monitors.has(pool.poolId)) return;
     const monitor = new PoolMonitor({
       poolId: pool.poolId,
@@ -37,6 +37,7 @@ export class PoolMonitorManager {
   removePool(poolId: string) {
     const monitor = this.monitors.get(poolId);
     if (monitor) {
+      console.log(`[PoolMonitorManager] Removing and stopping pool: ${monitor['tokenA']?.symbol || ''}/${monitor['tokenB']?.symbol || ''} (${poolId})`);
       monitor.stop();
       this.monitors.delete(poolId);
     }
@@ -44,6 +45,7 @@ export class PoolMonitorManager {
 
   stopAll() {
     for (const monitor of this.monitors.values()) {
+      console.log(`[PoolMonitorManager] Stopping pool: ${monitor['tokenA']?.symbol || ''}/${monitor['tokenB']?.symbol || ''} (${monitor['poolId']})`);
       monitor.stop();
     }
     this.monitors.clear();

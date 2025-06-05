@@ -10,6 +10,7 @@ export interface PoolSnapshot {
   tvl: number;
   marketCap: number;
   volumeChange: number;
+  volume24h: number; // 24h volume in USD
   suspicious: boolean;
 }
 

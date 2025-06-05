@@ -2,6 +2,8 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import { PoolSnapshot, MarketPressure, TrendDirection } from './types';
 import { DecimalHandler, ReserveMath } from './utils';
 import BN from 'bn.js';
+import { Api } from '@raydium-io/raydium-sdk-v2';
+import { insertPoolHistory } from './pool-history-db';
 
 interface TokenInfo {
   symbol: string;
@@ -15,7 +17,7 @@ interface PoolMonitorOptions {
   tokenB: TokenInfo;
   httpUrl: string;
   wssUrl: string;
-  onUpdate: (snapshot: PoolSnapshot, pressure: MarketPressure) => void;
+  onUpdate: (snapshot: PoolSnapshot, pressure: MarketPressure, originPrice: number | null, originBaseReserve: number | null, originQuoteReserve: number | null, prevSnapshot: PoolSnapshot | null) => void;
   historyLength?: number;
 }
 
@@ -24,10 +26,16 @@ export class PoolMonitor {
   private poolId: string;
   private tokenA: TokenInfo;
   private tokenB: TokenInfo;
-  private onUpdate: (snapshot: PoolSnapshot, pressure: MarketPressure) => void;
+  private onUpdate: (snapshot: PoolSnapshot, pressure: MarketPressure, originPrice: number | null, originBaseReserve: number | null, originQuoteReserve: number | null, prevSnapshot: PoolSnapshot | null) => void;
   private history: PoolSnapshot[] = [];
   private readonly HISTORY_LENGTH: number;
   private subscriptionId: number | null = null;
+  private firstSnapshotTimestamp: number | null = null;
+  private originPrice: number | null = null;
+  private originBaseReserve: number | null = null;
+  private originQuoteReserve: number | null = null;
+  private dbWriteTimer: NodeJS.Timeout | null = null;
+  private prevSnapshot: PoolSnapshot | null = null;
 
   constructor(options: PoolMonitorOptions) {
     this.poolId = options.poolId;
@@ -39,11 +47,18 @@ export class PoolMonitor {
   }
 
   async start() {
+    console.log(`[PoolMonitor] STARTED monitoring for pool: ${this.tokenA.symbol}/${this.tokenB.symbol} (${this.poolId})`);
     // Initial fetch for state
     const initialSnapshot = await this.getPoolSnapshot();
     if (initialSnapshot) {
       this.history.push(initialSnapshot);
-      this.onUpdate(initialSnapshot, this.analyzeMarketPressure(initialSnapshot));
+      if (this.originPrice === null) {
+        this.originPrice = initialSnapshot.price;
+        this.originBaseReserve = initialSnapshot.baseReserve;
+        this.originQuoteReserve = initialSnapshot.quoteReserve;
+      }
+      this.onUpdate(initialSnapshot, this.analyzeMarketPressure(initialSnapshot), this.originPrice, this.originBaseReserve, this.originQuoteReserve, null);
+      this.prevSnapshot = initialSnapshot;
     }
     // Subscribe to state changes
     this.subscriptionId = this.connection.onAccountChange(
@@ -52,8 +67,14 @@ export class PoolMonitor {
         try {
           const snapshot = await this.processPoolUpdate(accountInfo.data, context.slot);
           if (snapshot) {
+            if (this.originPrice === null) {
+              this.originPrice = snapshot.price;
+              this.originBaseReserve = snapshot.baseReserve;
+              this.originQuoteReserve = snapshot.quoteReserve;
+            }
             const pressure = this.analyzeMarketPressure(snapshot);
-            this.onUpdate(snapshot, pressure);
+            this.onUpdate(snapshot, pressure, this.originPrice, this.originBaseReserve, this.originQuoteReserve, this.prevSnapshot);
+            this.prevSnapshot = snapshot;
           }
         } catch (e) {
           console.error(`[PoolMonitor] Error processing update:`, e);
@@ -61,12 +82,43 @@ export class PoolMonitor {
       },
       'confirmed'
     );
+    // Start 1s DB write timer
+    this.dbWriteTimer = setInterval(() => {
+      if (!this.firstSnapshotTimestamp && this.history.length > 0) {
+        this.firstSnapshotTimestamp = this.history[0].timestamp;
+      }
+      if (this.history.length === 0 || !this.firstSnapshotTimestamp) return;
+      const latest = this.history[this.history.length - 1];
+      const elapsedSeconds = (latest.timestamp - this.firstSnapshotTimestamp) / 1000;
+      if (elapsedSeconds <= 21600) { // 6 hours
+        const pressure = this.analyzeMarketPressure(latest);
+        insertPoolHistory({
+          poolId: latest.poolId,
+          baseSymbol: this.tokenA.symbol,
+          quoteSymbol: this.tokenB.symbol,
+          timestamp: Math.floor(latest.timestamp / 1000),
+          price: latest.price,
+          tvl: latest.tvl,
+          baseReserve: latest.baseReserve,
+          quoteReserve: latest.quoteReserve,
+          buyPressure: pressure.buyPressure,
+          rugRisk: pressure.rugRisk,
+          trend: pressure.trend,
+          volume: latest.volume24h,
+        });
+      }
+    }, 1000);
   }
 
   async stop() {
+    console.log(`[PoolMonitor] STOPPED monitoring for pool: ${this.tokenA.symbol}/${this.tokenB.symbol} (${this.poolId})`);
     if (this.subscriptionId !== null) {
       this.connection.removeAccountChangeListener(this.subscriptionId);
       this.subscriptionId = null;
+    }
+    if (this.dbWriteTimer) {
+      clearInterval(this.dbWriteTimer);
+      this.dbWriteTimer = null;
     }
   }
 
@@ -85,7 +137,6 @@ export class PoolMonitor {
     // For now, assume Raydium V4 layout and fetch reserves from vaults
     // (In a full implementation, decode the pool state for vault addresses)
     // Here, we assume poolId is the state account and vaults are known
-    // For demo, just simulate reserves
     // TODO: Replace with actual vault fetching logic
     const baseReserve = Math.random() * 10000 + 50000; // Simulated
     const quoteReserve = Math.random() * 10000 + 50000; // Simulated
@@ -96,6 +147,19 @@ export class PoolMonitor {
     const marketCap = price * 1000000; // Placeholder
     const volumeChange = previous ? Math.abs(baseReserve - previous.baseReserve) : 0;
     const suspicious = false; // Placeholder
+
+    // Fetch 24h volume from Raydium SDK
+    let volume24h = 0;
+    try {
+      const api = new Api({ cluster: 'mainnet', timeout: 30000 });
+      const poolInfo = await api.fetchPoolById({ ids: this.poolId });
+      if (Array.isArray(poolInfo) && poolInfo.length > 0 && poolInfo[0]) {
+        volume24h = poolInfo[0].day?.volume || 0;
+      }
+    } catch (e) {
+      // If Raydium API fails, leave volume24h as 0
+    }
+
     const snapshot: PoolSnapshot = {
       poolId: this.poolId,
       timestamp: Date.now(),
@@ -107,10 +171,12 @@ export class PoolMonitor {
       tvl,
       marketCap,
       volumeChange,
+      volume24h,
       suspicious,
     };
     this.history.push(snapshot);
     if (this.history.length > this.HISTORY_LENGTH) this.history.shift();
+
     return snapshot;
   }
 
