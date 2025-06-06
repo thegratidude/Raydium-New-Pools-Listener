@@ -119,7 +119,7 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
     this.logger.log(`❌ Client disconnected - ID: ${client.id}`);
   }
 
-  broadcastNewPool(poolId: string) {
+  broadcastNewPool(poolId: string, baseMint: string, quoteMint: string) {
     if (!this.isInitialized || !this.server) {
       this.logger.error('Socket.IO server not started');
       return;
@@ -128,10 +128,20 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
     const message = {
       type: 'new_pool',
       poolId,
+      baseMint,
+      quoteMint,
       timestamp: new Date().toISOString(),
     };
 
-    this.logger.log(`📢 Broadcasting new pool: ${poolId}`);
+    // Make new pool messages very visible with clear formatting
+    this.logger.log('\n' + '='.repeat(80));
+    this.logger.log(`🚨 NEW POOL DETECTED 🚨`);
+    this.logger.log(`Pool ID: ${poolId}`);
+    this.logger.log(`Base Mint: ${baseMint}`);
+    this.logger.log(`Quote Mint: ${quoteMint}`);
+    this.logger.log(`Time: ${new Date().toISOString()}`);
+    this.logger.log('='.repeat(80) + '\n');
+
     this.server.emit('new_pool', message);
   }
 
@@ -144,6 +154,10 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
       timestamp: new Date().toISOString(),
       uptime,
     };
+    // Only log health status, no need to emit to clients
+    const hours = Math.floor(uptime / 3600);
+    const minutes = Math.floor((uptime % 3600) / 60);
+    this.logger.log(`[Health] Server uptime: ${hours}h ${minutes}m`);
     this.server.emit('health', message);
   }
 
@@ -156,7 +170,7 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
     this.healthCheckInterval = setInterval(() => {
       const uptime = Math.floor((Date.now() - startTime) / 1000);
       this.broadcastHealth(uptime);
-    }, 10000); // 10 seconds
+    }, 60000); // Changed to 60 seconds (1 minute)
   }
 
   onModuleDestroy() {

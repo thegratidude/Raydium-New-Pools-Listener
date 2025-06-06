@@ -98,7 +98,7 @@ export class PoolMonitorService implements OnModuleInit {
       }
       
       this.logger.log(`Socket service ready, broadcasting pool ${pool.poolId}...`);
-      this.socketService.broadcastNewPool(pool.poolId);
+      this.socketService.broadcastNewPool(pool.poolId, pool.tokenA, pool.tokenB);
       this.logger.log(`✅ Broadcast sent for pool ${pool.poolId}`);
 
       // Start real-time monitoring after successful broadcast
