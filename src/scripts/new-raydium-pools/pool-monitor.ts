@@ -1,8 +1,19 @@
 import { Connection, PublicKey } from '@solana/web3.js';
+import {
+  PoolMonitorOptions,
+  PoolMonitorState,
+  MonitorConfig,
+  MonitorAlert,
+  PoolReserves,
+  TradeActivity,
+  PriceState
+} from '../pool-monitor/types/monitor.types';
+import { Api } from '@raydium-io/raydium-sdk-v2';
 import { analyzePool } from '../pool-analyzer/analyzer';
-import { RAYDIUM_PUBLIC_KEY } from 'src/main';
 import { PoolMonitor as RealTimeMonitor } from '../pool-monitor/monitor';
-import { MonitorConfig } from '../pool-monitor/types/monitor.types';
+
+// Constants
+const RAYDIUM_PUBLIC_KEY = '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8';
 
 interface PoolStatus {
   poolAddress: string;

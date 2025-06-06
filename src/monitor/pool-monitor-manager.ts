@@ -1,53 +1,45 @@
-import { PoolMonitor } from './pool-monitor';
-import { PoolSnapshot, MarketPressure, PoolDiscoveryResult } from './types';
+import { Injectable, Logger } from '@nestjs/common';
+import { Connection } from '@solana/web3.js';
+import { PoolInfo, TokenInfo, PoolUpdateCallback } from './types';
 
-interface PoolMonitorManagerOptions {
-  httpUrl: string;
-  wssUrl: string;
-  historyLength?: number;
-}
-
+@Injectable()
 export class PoolMonitorManager {
-  private monitors: Map<string, PoolMonitor> = new Map();
-  private httpUrl: string;
-  private wssUrl: string;
-  private historyLength: number;
+  private readonly logger = new Logger(PoolMonitorManager.name);
+  private pools: Map<string, any> = new Map();
 
-  constructor(options: PoolMonitorManagerOptions) {
-    this.httpUrl = options.httpUrl;
-    this.wssUrl = options.wssUrl;
-    this.historyLength = options.historyLength || 50;
+  constructor(private readonly connection: Connection) {
+    this.logger.log('PoolMonitorManager initialized');
   }
 
-  addPool(pool: PoolDiscoveryResult, tokenA: { symbol: string; decimals: number; mint: string; }, tokenB: { symbol: string; decimals: number; mint: string; }, onUpdate: (snapshot: PoolSnapshot, pressure: MarketPressure, originPrice: number | null, originBaseReserve: number | null, originQuoteReserve: number | null, prevSnapshot: any) => void) {
-    if (this.monitors.has(pool.poolId)) return;
-    const monitor = new PoolMonitor({
-      poolId: pool.poolId,
-      tokenA,
-      tokenB,
-      httpUrl: this.httpUrl,
-      wssUrl: this.wssUrl,
+  addPool(
+    poolInfo: PoolInfo,
+    baseToken: TokenInfo,
+    quoteToken: TokenInfo,
+    onUpdate: PoolUpdateCallback
+  ) {
+    this.logger.log(`Adding pool ${poolInfo.poolId} to real-time monitoring`);
+    this.logger.log(`Pair: ${baseToken.symbol}/${quoteToken.symbol}`);
+    
+    // Add pool monitoring logic here
+    this.pools.set(poolInfo.poolId, {
+      poolInfo,
+      baseToken,
+      quoteToken,
       onUpdate,
-      historyLength: this.historyLength,
+      lastUpdate: Date.now()
     });
-    this.monitors.set(pool.poolId, monitor);
-    monitor.start();
+
+    this.logger.log(`✅ Pool ${poolInfo.poolId} added to real-time monitoring`);
   }
 
   removePool(poolId: string) {
-    const monitor = this.monitors.get(poolId);
-    if (monitor) {
-      console.log(`[PoolMonitorManager] Removing and stopping pool: ${monitor['tokenA']?.symbol || ''}/${monitor['tokenB']?.symbol || ''} (${poolId})`);
-      monitor.stop();
-      this.monitors.delete(poolId);
+    if (this.pools.has(poolId)) {
+      this.pools.delete(poolId);
+      this.logger.log(`Removed pool ${poolId} from monitoring`);
     }
   }
 
-  stopAll() {
-    for (const monitor of this.monitors.values()) {
-      console.log(`[PoolMonitorManager] Stopping pool: ${monitor['tokenA']?.symbol || ''}/${monitor['tokenB']?.symbol || ''} (${monitor['poolId']})`);
-      monitor.stop();
-    }
-    this.monitors.clear();
+  getActivePools() {
+    return Array.from(this.pools.keys());
   }
 } 

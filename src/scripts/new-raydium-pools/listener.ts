@@ -1,12 +1,11 @@
-import { Logger } from '@nestjs/common';
+import { Logger, INestApplication } from '@nestjs/common';
 import {
   Connection,
   ParsedInstruction,
   PartiallyDecodedInstruction,
   PublicKey,
 } from '@solana/web3.js';
-import { RAYDIUM_PUBLIC_KEY } from 'src/main';
-import { sleep } from 'src/utils/sleep';
+import { sleep } from '../../utils/sleep';
 import { liuquidityPoolIndex, quoteIndex, tokenMintIndex } from './constants';
 // import { getPoolMonitor } from './pool-monitor';
 import { PendingPoolManager } from '../../monitor/pending-pool-manager';
@@ -15,16 +14,37 @@ import { insertPoolHistory, initPoolHistoryDB } from '../../monitor/pool-history
 import { simulateRoundTripTrade } from '../../monitor/utils';
 import * as dotenv from 'dotenv';
 import { senseTop, DEFAULT_PLATEAU_WINDOW } from '../../utils/senseTop';
+import { PoolMonitorService } from '../../monitor/pool-monitor.service';
+import { NestFactory } from '@nestjs/core';
+import { AppModule } from '../../app.module';
 dotenv.config();
 
 const HTTP_URL = process.env.HTTP_URL!;
 const WSS_URL = process.env.WSS_URL!;
 
 const connection = new Connection(HTTP_URL);
-const poolMonitorManager = new PoolMonitorManager({ httpUrl: HTTP_URL, wssUrl: WSS_URL });
 
 // Initialize SQLite DB for pool history
 initPoolHistoryDB();
+
+// Initialize services
+let poolMonitorService: PoolMonitorService;
+let poolMonitorManager: PoolMonitorManager;
+let pendingPoolManager: PendingPoolManager;
+
+export async function initializeServices(app: INestApplication) {
+  // Get services from the existing NestJS container
+  poolMonitorService = app.get(PoolMonitorService);
+  poolMonitorManager = app.get(PoolMonitorManager);
+  
+  // Create PendingPoolManager with injected services
+  pendingPoolManager = new PendingPoolManager(
+    app.get(Connection),
+    poolMonitorService
+  );
+  
+  console.log('✅ Services initialized: PoolMonitorService and PoolMonitorManager');
+}
 
 // Add a mapping from mint addresses to symbols and decimals
 const MINT_TO_TOKEN = {
@@ -90,41 +110,6 @@ function conciseOnUpdate(snapshot, pressure, tokenA, tokenB, originPrice, origin
   );
 }
 
-// PendingPoolManager setup
-const pendingPoolManager = new PendingPoolManager({
-  connection,
-  checkInterval: 30_000,
-  maxAttempts: 30,
-  onPoolReady: (pool) => {
-    // When pool is indexed, hand off to PoolMonitorManager
-    const tokenAInfo = MINT_TO_TOKEN[pool.tokenA] || { symbol: pool.tokenA, decimals: 9 };
-    const tokenBInfo = MINT_TO_TOKEN[pool.tokenB] || { symbol: pool.tokenB, decimals: 6 };
-    poolMonitorManager.addPool(
-      {
-        poolId: pool.poolId,
-        baseMint: pool.tokenA,
-        quoteMint: pool.tokenB,
-        lpMint: '',
-        isViable: true
-      },
-      { symbol: tokenAInfo.symbol, decimals: tokenAInfo.decimals, mint: pool.tokenA },
-      { symbol: tokenBInfo.symbol, decimals: tokenBInfo.decimals, mint: pool.tokenB },
-      (snapshot, pressure, originPrice, originBaseReserve, originQuoteReserve) => conciseOnUpdate(
-        snapshot,
-        pressure,
-        { symbol: tokenAInfo.symbol, decimals: tokenAInfo.decimals, mint: pool.tokenA },
-        { symbol: tokenBInfo.symbol, decimals: tokenBInfo.decimals, mint: pool.tokenB },
-        originPrice,
-        originBaseReserve,
-        originQuoteReserve,
-        null,
-        pool.poolId
-      )
-    );
-    Logger.log(`Started real-time monitoring for pool: ${tokenAInfo.symbol}/${tokenBInfo.symbol} (${pool.poolId})`);
-  }
-});
-
 // Health check: count messages seen
 let messageCount = 0;
 setInterval(() => {
@@ -138,16 +123,47 @@ function isPartiallyDecodedInstruction(
   return (instruction as PartiallyDecodedInstruction).accounts !== undefined;
 }
 
-// Fetch raydium mints and add to pool monitor
+// Constants
+const RAYDIUM_PUBLIC_KEY = '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8';
+
+// Modify the pool detection handler
+async function handleNewPool(liquidityPoolAddressAccount: string, tokenAAccount: PublicKey, tokenBAccount: PublicKey) {
+  console.log('\n📊 Pool Details:');
+  console.log('════════════════════════════════════════════════════════════════════════════════');
+  console.log(`Token A: ${tokenAAccount.toBase58()}`);
+  console.log(`Token B: ${tokenBAccount.toBase58()}`);
+  console.log(`Pool Address: ${liquidityPoolAddressAccount}`);
+  console.log('════════════════════════════════════════════════════════════════════════════════\n');
+
+  if (liquidityPoolAddressAccount) {
+    console.log(`\n➕ Adding pool to monitor service: ${liquidityPoolAddressAccount}`);
+    
+    // Add pool to PoolMonitorService which will handle both broadcast and monitoring
+    poolMonitorService.addNewPool(
+      liquidityPoolAddressAccount,
+      tokenAAccount.toBase58(),
+      tokenBAccount.toBase58()
+    );
+  } else {
+    console.log('❌ Missing liquidity pool address, skipping pool');
+  }
+}
+
+// Update the fetchRaydiumMints function to use the new handler
 async function fetchRaydiumMints(txId: string, connection: Connection) {
   try {
+    console.log('\n🔍 Processing Transaction:');
+    console.log('════════════════════════════════════════════════════════════════════════════════');
+    console.log(`Transaction ID: ${txId}`);
+    console.log('════════════════════════════════════════════════════════════════════════════════\n');
+
     const tx = await connection.getParsedTransaction(txId, {
       maxSupportedTransactionVersion: 0,
       commitment: 'confirmed',
     });
 
     if (!tx) {
-      console.log('Transaction not found:', txId);
+      console.log('❌ Transaction not found:', txId);
       return;
     }
 
@@ -184,30 +200,24 @@ async function fetchRaydiumMints(txId: string, connection: Connection) {
       const liquidityPoolAddressAccount =
         accounts[liuquidityPoolIndex]?.toBase58();
 
-      Logger.log('token mint address', tokenAAccount);
-      Logger.log('quote address', tokenBAccount);
-      Logger.log('liquidity pool address', liquidityPoolAddressAccount);
-
-      // Add pool to pending manager if we have all required addresses
-      if (liquidityPoolAddressAccount) {
-        pendingPoolManager.addPool(
-          liquidityPoolAddressAccount,
-          tokenAAccount.toBase58(),
-          tokenBAccount.toBase58()
-        );
-        Logger.log(`Added pool to pending manager: ${liquidityPoolAddressAccount}`);
-      }
+      await handleNewPool(liquidityPoolAddressAccount, tokenAAccount, tokenBAccount);
+    } else {
+      console.log('❌ No Raydium instruction found in transaction');
     }
   } catch (error) {
-    Logger.log('error', error);
+    console.error('❌ Error processing transaction:', error);
   }
 }
 
 export async function startConnection(
+  app: INestApplication,
   connection: Connection,
   programAddress: PublicKey,
   searchInstruction: string,
 ): Promise<void> {
+  // Initialize services with the app instance
+  await initializeServices(app);
+
   console.log('Monitoring logs for program:', programAddress.toString());
   connection.onLogs(
     programAddress,
