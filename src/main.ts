@@ -38,7 +38,11 @@ export const rpcConnection = new Connection(HTTP_URL, {
 });
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, { 
+    cors: true,
+    // Enable hybrid application (HTTP + WebSocket)
+    logger: ['error', 'warn', 'log', 'debug', 'verbose'],
+  });
 
   const corsOptions = {
     origin: '*',
@@ -49,6 +53,8 @@ async function bootstrap() {
   };
 
   app.enableCors(corsOptions);
+
+  console.log("NestJS app (HTTP + WebSocket) will listen on port 5001");
 
   await app.listen(5001);
   // Start the pool listener in parallel (do not await, so both run at the same time)
