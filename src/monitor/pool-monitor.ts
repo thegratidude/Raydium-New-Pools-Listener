@@ -82,32 +82,6 @@ export class PoolMonitor {
       },
       'confirmed'
     );
-    // Start 1s DB write timer
-    this.dbWriteTimer = setInterval(() => {
-      if (!this.firstSnapshotTimestamp && this.history.length > 0) {
-        this.firstSnapshotTimestamp = this.history[0].timestamp;
-      }
-      if (this.history.length === 0 || !this.firstSnapshotTimestamp) return;
-      const latest = this.history[this.history.length - 1];
-      const elapsedSeconds = (latest.timestamp - this.firstSnapshotTimestamp) / 1000;
-      if (elapsedSeconds <= 21600) { // 6 hours
-        const pressure = this.analyzeMarketPressure(latest);
-        insertPoolHistory({
-          poolId: latest.poolId,
-          baseSymbol: this.tokenA.symbol,
-          quoteSymbol: this.tokenB.symbol,
-          timestamp: Math.floor(latest.timestamp / 1000),
-          price: latest.price,
-          tvl: latest.tvl,
-          baseReserve: latest.baseReserve,
-          quoteReserve: latest.quoteReserve,
-          buyPressure: pressure.buyPressure,
-          rugRisk: pressure.rugRisk,
-          trend: pressure.trend,
-          volume: latest.volume24h,
-        });
-      }
-    }, 1000);
   }
 
   async stop() {
@@ -115,10 +89,6 @@ export class PoolMonitor {
     if (this.subscriptionId !== null) {
       this.connection.removeAccountChangeListener(this.subscriptionId);
       this.subscriptionId = null;
-    }
-    if (this.dbWriteTimer) {
-      clearInterval(this.dbWriteTimer);
-      this.dbWriteTimer = null;
     }
   }
 

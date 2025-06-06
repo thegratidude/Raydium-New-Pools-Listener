@@ -14,6 +14,7 @@ import { PoolMonitorManager } from '../../monitor/pool-monitor-manager';
 import { insertPoolHistory, initPoolHistoryDB } from '../../monitor/pool-history-db';
 import { simulateRoundTripTrade } from '../../monitor/utils';
 import * as dotenv from 'dotenv';
+import { senseTop, DEFAULT_PLATEAU_WINDOW } from '../../utils/senseTop';
 dotenv.config();
 
 const HTTP_URL = process.env.HTTP_URL!;
@@ -39,6 +40,9 @@ function truncateAddress(addr, len = 4) {
   return `${addr.slice(0, len)}...${addr.slice(-len)}`;
 }
 
+// Track recent profit % history for each pool
+const profitHistoryMap = new Map();
+
 // Concise default onUpdate callback with DB write
 function conciseOnUpdate(snapshot, pressure, tokenA, tokenB, originPrice, originBaseReserve, originQuoteReserve, prevSnapshot, poolIdOverride) {
   // Format TVL as $###k
@@ -51,6 +55,7 @@ function conciseOnUpdate(snapshot, pressure, tokenA, tokenB, originPrice, origin
 
   // Restore profit calculation and colorization
   let profitStr = '';
+  let profitPct = 0;
   if (originBaseReserve && originQuoteReserve && snapshot.baseReserve && snapshot.quoteReserve) {
     const sim = simulateRoundTripTrade({
       originBase: originBaseReserve,
@@ -60,10 +65,23 @@ function conciseOnUpdate(snapshot, pressure, tokenA, tokenB, originPrice, origin
       tradeSize: 1,
       feeBps: 25,
     });
+    profitPct = sim.profitPct;
     // Colorize profit: green for positive, red for negative
     const profitColor = sim.profitPct >= 0 ? '\x1b[32m' : '\x1b[31m'; // green or red
     const resetColor = '\x1b[0m';
     profitStr = `Profit ${profitColor}${sim.profitPct >= 0 ? '+' : ''}${sim.profitPct.toFixed(2)}% (${sim.netProfit.toFixed(2)} SOL)${resetColor}`;
+  }
+
+  // Track profit history for this pool
+  const poolId = snapshot.poolId || poolIdOverride || '';
+  let history = profitHistoryMap.get(poolId) || [];
+  history.push(profitPct);
+  if (history.length > 10) history = history.slice(-10); // keep last 10
+  profitHistoryMap.set(poolId, history);
+
+  // Check for top
+  if (senseTop(history)) {
+    console.log('\x1b[41m\x1b[97m***************** TOP IDENTIFIED *********************\x1b[0m');
   }
 
   // Print concise output: truncated base mint, /SOL, price, TVL, base/quote reserves, profit

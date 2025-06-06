@@ -28,6 +28,21 @@ export function initPoolHistoryDB() {
       UNIQUE(pool_id, timestamp)
     );
     CREATE INDEX IF NOT EXISTS idx_pool_time ON pool_history(pool_id, timestamp);
+    -- New table for swap transactions
+    CREATE TABLE IF NOT EXISTS swap_tx_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      pool_id TEXT,
+      action TEXT,
+      base_symbol TEXT,
+      quote_symbol TEXT,
+      amount_in REAL,
+      amount_out REAL,
+      tx_hash TEXT,
+      status TEXT,
+      error TEXT,
+      timestamp INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_swap_tx_time ON swap_tx_history(pool_id, timestamp);
   `);
   // Test DB write/read/delete after schema is created (startup only)
   const testData = {
@@ -130,5 +145,52 @@ export function insertPoolHistory({
     );
   } catch (err) {
     console.error(`[pool-history-db] Failed to write to SQLite:`, err);
+  }
+}
+
+// Insert a new swap transaction record
+export function insertSwapTx({
+  poolId,
+  action,
+  baseSymbol,
+  quoteSymbol,
+  amountIn,
+  amountOut,
+  txHash,
+  status,
+  error,
+  timestamp,
+}: {
+  poolId: string;
+  action: 'buy' | 'sell';
+  baseSymbol: string;
+  quoteSymbol: string;
+  amountIn: number;
+  amountOut: number;
+  txHash: string;
+  status: string;
+  error?: string;
+  timestamp: number;
+}) {
+  try {
+    const stmt = db.prepare(`
+      INSERT INTO swap_tx_history
+        (pool_id, action, base_symbol, quote_symbol, amount_in, amount_out, tx_hash, status, error, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    stmt.run(
+      poolId,
+      action,
+      baseSymbol,
+      quoteSymbol,
+      amountIn,
+      amountOut,
+      txHash,
+      status,
+      error || '',
+      timestamp
+    );
+  } catch (err) {
+    console.error(`[pool-history-db] Failed to write swap tx to SQLite:`, err);
   }
 } 

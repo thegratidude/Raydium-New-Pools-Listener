@@ -1,6 +1,7 @@
 import { Connection } from '@solana/web3.js';
 import { Api, PoolFetchType } from '@raydium-io/raydium-sdk-v2';
 import * as dotenv from 'dotenv';
+import { getRaydiumRoundTripQuote } from '../../raydium/quoteRaydium';
 
 dotenv.config();
 
@@ -57,4 +58,21 @@ async function testSdk() {
   }
 }
 
-testSdk().catch(console.error); 
+async function testRaydiumQuote() {
+  // Use the provided pool address
+  const POOL_ADDRESS = '3ZgdevA7qNCtRtJ1nwpGDfq6zsSqtYEvv7wvqEUr43Eh';
+  const SOL_MINT = 'So11111111111111111111111111111111111111112';
+  const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+  console.log('\nTesting Raydium quoting module...');
+  const quote = await getRaydiumRoundTripQuote({
+    poolAddress: POOL_ADDRESS,
+    baseMint: SOL_MINT,
+    quoteMint: USDC_MINT,
+    tradeSizeSOL: 1,
+  });
+  console.log('\nRaydium Quote Result:');
+  console.dir(quote, { depth: null });
+}
+
+testSdk().catch(console.error);
+testRaydiumQuote().catch(console.error); 
