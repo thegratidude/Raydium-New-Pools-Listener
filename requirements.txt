@@ -1,0 +1,4 @@
+solana
+solders
+python-dotenv
+# Add any additional dependencies below as needed 

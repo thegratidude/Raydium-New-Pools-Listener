@@ -3,6 +3,18 @@ import { AppModule } from './app.module';
 import { startConnection } from './scripts/new-raydium-pools/listener';
 import { Connection, PublicKey } from '@solana/web3.js';
 import * as dotenv from 'dotenv';
+import { execSync } from 'child_process';
+
+// Kill any process using port 5001 (macOS/Linux only)
+try {
+  const pid = execSync("lsof -ti:5001").toString().trim();
+  if (pid) {
+    console.log(`Killing process on port 5001 (PID: ${pid})`);
+    execSync(`kill -9 ${pid}`);
+  }
+} catch (e) {
+  // No process found or error occurred, ignore
+}
 
 // Load environment variables
 dotenv.config();
@@ -39,7 +51,8 @@ async function bootstrap() {
   app.enableCors(corsOptions);
 
   await app.listen(5001);
-  await startConnection(rpcConnection, RAYDIUM, INSTRUCTION_NAME);
+  // Start the pool listener in parallel (do not await, so both run at the same time)
+  startConnection(rpcConnection, RAYDIUM, INSTRUCTION_NAME).catch(console.error);
 }
 
 bootstrap();
