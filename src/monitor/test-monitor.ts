@@ -2,6 +2,7 @@ import { config } from 'dotenv';
 config();
 import { PoolMonitorManager } from './pool-monitor-manager';
 import fetch from 'node-fetch';
+import { Connection } from '@solana/web3.js';
 
 const HTTP_URL = process.env.HTTP_URL!;
 const WSS_URL = process.env.WSS_URL!;
@@ -18,7 +19,8 @@ const poolDiscoveryResult = {
 const tokenA = { symbol: 'SOL', decimals: 9, mint: poolDiscoveryResult.baseMint };
 const tokenB = { symbol: 'USDC', decimals: 6, mint: poolDiscoveryResult.quoteMint };
 
-const manager = new PoolMonitorManager({ httpUrl: HTTP_URL, wssUrl: WSS_URL });
+const connection = new Connection(HTTP_URL, { wsEndpoint: WSS_URL });
+const manager = new PoolMonitorManager(connection);
 
 let solPrice = 0;
 

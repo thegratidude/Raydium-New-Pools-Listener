@@ -54,17 +54,31 @@ export class PoolMonitorService implements OnModuleInit {
       },
       tokenAInfo,
       tokenBInfo,
-      (snapshot, pressure: MarketPressure, originPrice, originBaseReserve, originQuoteReserve) => conciseOnUpdate(
-        snapshot,
-        pressure,
-        tokenAInfo,
-        tokenBInfo,
-        originPrice,
-        originBaseReserve,
-        originQuoteReserve,
-        null,
-        pool.poolId
-      )
+      (snapshot, pressure: MarketPressure, originPrice, originBaseReserve, originQuoteReserve) => {
+        // Broadcast update via socket
+        this.socketService.broadcastPoolUpdate(pool.poolId, {
+          price: snapshot.price,
+          baseReserve: snapshot.baseReserve,
+          quoteReserve: snapshot.quoteReserve,
+          tvl: snapshot.tvl,
+          volume24h: snapshot.volume24h || 0,
+          priceChange: snapshot.priceChange,
+          timestamp: snapshot.timestamp
+        });
+
+        // Call original update handler
+        return conciseOnUpdate(
+          snapshot,
+          pressure,
+          tokenAInfo,
+          tokenBInfo,
+          originPrice,
+          originBaseReserve,
+          originQuoteReserve,
+          null,
+          pool.poolId
+        );
+      }
     );
   }
 
@@ -83,6 +97,21 @@ export class PoolMonitorService implements OnModuleInit {
         return;
       }
 
+      // Get token info with decimals
+      const tokenAInfo = MINT_TO_TOKEN[pool.tokenA] || { symbol: pool.tokenA, decimals: 9, mint: pool.tokenA };
+      const tokenBInfo = MINT_TO_TOKEN[pool.tokenB] || { symbol: pool.tokenB, decimals: 6, mint: pool.tokenB };
+
+      // Calculate initial price if possible
+      let initialPrice: number | undefined;
+      try {
+        const quoteResult = await this.poolMonitorManager.getInitialQuote(pool.poolId, pool.tokenA, pool.tokenB);
+        if (quoteResult && quoteResult.price) {
+          initialPrice = quoteResult.price;
+        }
+      } catch (error) {
+        this.logger.warn(`Could not calculate initial price for pool ${pool.poolId}: ${error}`);
+      }
+
       // Only broadcast if we have confirmed the pool exists
       this.logger.log(`✅ Pool ${pool.poolId} verified as indexed and ready for trading`);
       this.logger.log(`📢 Preparing to broadcast new pool (${pool.poolId})`);
@@ -98,7 +127,14 @@ export class PoolMonitorService implements OnModuleInit {
       }
       
       this.logger.log(`Socket service ready, broadcasting pool ${pool.poolId}...`);
-      this.socketService.broadcastNewPool(pool.poolId, pool.tokenA, pool.tokenB);
+      this.socketService.broadcastNewPool(
+        pool.poolId,
+        pool.tokenA,
+        pool.tokenB,
+        tokenAInfo.decimals,
+        tokenBInfo.decimals,
+        initialPrice
+      );
       this.logger.log(`✅ Broadcast sent for pool ${pool.poolId}`);
 
       // Start real-time monitoring after successful broadcast

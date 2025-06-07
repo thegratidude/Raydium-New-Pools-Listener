@@ -1,8 +1,18 @@
 import { Module } from '@nestjs/common';
-import { GatewayService } from './gateway.service';
+import { SocketService, EXPRESS_APP } from './socket.service';
+import { Express } from 'express';
 
 @Module({
-  providers: [GatewayService],
-  exports: [GatewayService],
+  providers: [
+    SocketService,
+    {
+      provide: EXPRESS_APP,
+      useFactory: () => {
+        const express = require('express');
+        return express();
+      },
+    },
+  ],
+  exports: [SocketService, EXPRESS_APP],
 })
 export class GatewayModule {}

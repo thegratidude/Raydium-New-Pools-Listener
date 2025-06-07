@@ -119,7 +119,7 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
     this.logger.log(`❌ Client disconnected - ID: ${client.id}`);
   }
 
-  broadcastNewPool(poolId: string, baseMint: string, quoteMint: string) {
+  broadcastNewPool(poolId: string, baseMint: string, quoteMint: string, baseDecimals: number, quoteDecimals: number, initialPrice?: number) {
     if (!this.isInitialized || !this.server) {
       this.logger.error('Socket.IO server not started');
       return;
@@ -130,6 +130,9 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
       poolId,
       baseMint,
       quoteMint,
+      baseDecimals,
+      quoteDecimals,
+      initialPrice,
       timestamp: new Date().toISOString(),
     };
 
@@ -137,8 +140,11 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
     this.logger.log('\n' + '='.repeat(80));
     this.logger.log(`🚨 NEW POOL DETECTED 🚨`);
     this.logger.log(`Pool ID: ${poolId}`);
-    this.logger.log(`Base Mint: ${baseMint}`);
-    this.logger.log(`Quote Mint: ${quoteMint}`);
+    this.logger.log(`Base Mint: ${baseMint} (${baseDecimals} decimals)`);
+    this.logger.log(`Quote Mint: ${quoteMint} (${quoteDecimals} decimals)`);
+    if (initialPrice) {
+      this.logger.log(`Initial Price: ${initialPrice}`);
+    }
     this.logger.log(`Time: ${new Date().toISOString()}`);
     this.logger.log('='.repeat(80) + '\n');
 
@@ -159,6 +165,30 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
     const minutes = Math.floor((uptime % 3600) / 60);
     this.logger.log(`[Health] Server uptime: ${hours}h ${minutes}m`);
     this.server.emit('health', message);
+  }
+
+  broadcastPoolUpdate(poolId: string, data: {
+    price: number;
+    baseReserve: number;
+    quoteReserve: number;
+    tvl: number;
+    volume24h: number;
+    priceChange: number;
+    timestamp: number;
+  }) {
+    if (!this.isInitialized || !this.server) {
+      this.logger.error('Socket.IO server not started');
+      return;
+    }
+
+    const message = {
+      type: 'pool_update',
+      poolId,
+      ...data,
+      timestamp: new Date().toISOString()
+    };
+
+    this.server.emit('pool_update', message);
   }
 
   private startHealthChecks() {

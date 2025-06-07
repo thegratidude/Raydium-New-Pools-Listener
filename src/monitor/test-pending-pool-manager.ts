@@ -1,51 +1,38 @@
-import { config } from 'dotenv';
-config();
 import { Connection } from '@solana/web3.js';
 import { PendingPoolManager } from './pending-pool-manager';
+import { PoolMonitorService } from './pool-monitor.service';
+import { NestFactory } from '@nestjs/core';
+import { AppModule } from '../app.module';
 
-const HTTP_URL = process.env.HTTP_URL!;
-const connection = new Connection(HTTP_URL);
+async function runTest() {
+  const HTTP_URL = process.env.HTTP_URL!;
+  const connection = new Connection(HTTP_URL);
 
-const knownPool = {
-  poolId: '58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2', // SOL/USDC
-  tokenA: 'SOL',
-  tokenB: 'USDC',
-};
-const fakePool = {
-  poolId: '2uL5j6h8k9m1p3r5t7w9z1x3v5b7n9q2s4u6w8y1a3c5e',
-  tokenA: 'FAKE',
-  tokenB: 'USDC',
-};
+  // Create NestJS app to get PoolMonitorService
+  const app = await NestFactory.create(AppModule);
+  await app.init();
+  const poolMonitorService = app.get(PoolMonitorService);
 
-let resolved = 0;
+  // Create manager with injected services
+  const manager = new PendingPoolManager(connection, poolMonitorService);
 
-const manager = new PendingPoolManager({
-  connection,
-  checkInterval: 10_000, // 10s for test
-  maxAttempts: 3,        // quick fail for fake
-  onPoolReady: (pool) => {
-    console.log(`✅ Indexed: ${pool.tokenA}/${pool.tokenB} (${pool.poolId}) after ${pool.attempts} attempts`);
-    resolved++;
-    if (resolved === 2) {
-      manager.stop();
-      process.exit(0);
-    }
-  },
-});
+  // Test pool
+  const testPool = {
+    poolId: 'test_pool_123',
+    tokenA: 'So11111111111111111111111111111111111111112', // SOL
+    tokenB: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'  // USDC
+  };
 
-manager.addPool(knownPool.poolId, knownPool.tokenA, knownPool.tokenB);
-manager.addPool(fakePool.poolId, fakePool.tokenA, fakePool.tokenB);
+  // Add test pool
+  manager.addPool(testPool.poolId, testPool.tokenA, testPool.tokenB);
 
-// Also log failures
-setInterval(() => {
-  const failed = manager.getPendingPools().filter(p => p.state === 'failed');
-  for (const pool of failed) {
-    console.log(`❌ Failed: ${pool.tokenA}/${pool.tokenB} (${pool.poolId}) after ${pool.attempts} attempts`);
-    resolved++;
-    manager.removePool(pool.poolId);
-    if (resolved === 2) {
-      manager.stop();
-      process.exit(0);
-    }
-  }
-}, 2000); 
+  // Keep the process running
+  console.log('Test pending pool manager running... Press Ctrl+C to stop');
+  process.on('SIGINT', async () => {
+    console.log('Stopping test pending pool manager...');
+    await app.close();
+    process.exit(0);
+  });
+}
+
+runTest().catch(console.error); 
