@@ -47,7 +47,7 @@ export class PoolMonitorManager {
 
       try {
         // Add timeout to health check
-        const healthCheckPromise = this.connection.getRecentBlockhash();
+        const healthCheckPromise = this.connection.getLatestBlockhash();
         const timeoutPromise = new Promise((_, reject) => 
           setTimeout(() => reject(new Error('Health check timeout')), this.HEALTH_CHECK_TIMEOUT)
         );
