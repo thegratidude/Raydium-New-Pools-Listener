@@ -6,6 +6,16 @@ export enum TrendDirection {
   Sideways = 'sideways'
 }
 
+// Define pool state type
+export interface RaydiumPoolState {
+  baseMint: string;
+  quoteMint: string;
+  baseVault: string;
+  quoteVault: string;
+  baseDecimal: number;
+  quoteDecimal: number;
+}
+
 // PoolSnapshot: represents a single point-in-time state of a pool
 export interface PoolSnapshot {
   poolId: string;
@@ -20,17 +30,25 @@ export interface PoolSnapshot {
   volumeChange: number;
   volume24h: number; // 24h volume in USD
   suspicious: boolean;
+  poolState?: RaydiumPoolState;
+  // Additional properties for monitoring
+  pressure?: MarketPressure;
+  originPrice?: number | null;
+  originBaseReserve?: number | null;
+  originQuoteReserve?: number | null;
+  previousSnapshot?: PoolSnapshot | null;
 }
 
 // MarketPressure: analytics for buy/sell pressure, rug risk, and trend
 export interface MarketPressure {
-  buyPressure: number;    // 0-100 scale
-  sellPressure: number;   // 0-100 scale
-  rugRisk: number;        // 0-100 scale
-  trend: TrendDirection;
-  value: number;          // Combined pressure value
-  direction: 'up' | 'down' | 'neutral';
-  strength: 'strong' | 'moderate' | 'weak';
+  value: number;           // 0-100 scale
+  direction: TrendDirection;  // Use TrendDirection enum instead of string
+  strength: number;        // 0-100 scale
+  severity: 'high' | 'medium' | 'low';
+  buyPressure: number;     // 0-100 scale
+  sellPressure: number;    // 0-100 scale
+  rugRisk: number;         // 0-100 scale
+  trend: TrendDirection;   // Use TrendDirection enum
 }
 
 // PoolDiscoveryResult: for integration with listener
@@ -66,15 +84,7 @@ export const MINT_TO_TOKEN: Record<string, TokenInfo> = {
 };
 
 // Update callback type
-export type PoolUpdateCallback = (
-  snapshot: PoolSnapshot,
-  pressure: MarketPressure,
-  originPrice: number | null,
-  originBaseReserve: number | null,
-  originQuoteReserve: number | null,
-  previousSnapshot: PoolSnapshot | null,
-  poolId: string
-) => void;
+export type PoolUpdateCallback = (snapshot: PoolSnapshot) => void;
 
 // Default update callback
 export function conciseOnUpdate(

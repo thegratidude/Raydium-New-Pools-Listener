@@ -3,7 +3,7 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import { PendingPoolManager, PendingPool } from './pending-pool-manager';
 import { SocketService } from '../gateway/socket.service';
 import { PoolMonitorManager } from './pool-monitor-manager';
-import { MINT_TO_TOKEN, TokenInfo, conciseOnUpdate, MarketPressure } from './types';
+import { MINT_TO_TOKEN, TokenInfo, conciseOnUpdate, MarketPressure, TrendDirection } from './types';
 
 @Injectable()
 export class PoolMonitorService implements OnModuleInit {
@@ -54,7 +54,7 @@ export class PoolMonitorService implements OnModuleInit {
       },
       tokenAInfo,
       tokenBInfo,
-      (snapshot, pressure: MarketPressure, originPrice, originBaseReserve, originQuoteReserve) => {
+      (snapshot) => {
         // Broadcast update via socket
         this.socketService.broadcastPoolUpdate(pool.poolId, {
           price: snapshot.price,
@@ -66,90 +66,148 @@ export class PoolMonitorService implements OnModuleInit {
           timestamp: snapshot.timestamp
         });
 
-        // Call original update handler
-        return conciseOnUpdate(
+        // Log update using conciseOnUpdate
+        conciseOnUpdate(
           snapshot,
-          pressure,
+          snapshot.pressure || { 
+            direction: TrendDirection.Sideways,
+            strength: 0,
+            value: 0,
+            buyPressure: 0,
+            sellPressure: 0,
+            rugRisk: 0,
+            trend: TrendDirection.Sideways,
+            severity: 'low'
+          },
           tokenAInfo,
           tokenBInfo,
-          originPrice,
-          originBaseReserve,
-          originQuoteReserve,
-          null,
+          snapshot.originPrice || null,
+          snapshot.originBaseReserve || null,
+          snapshot.originQuoteReserve || null,
+          snapshot.previousSnapshot || null,
           pool.poolId
         );
       }
     );
   }
 
+  public async handlePoolExists(pool: PendingPool) {
+    try {
+      this.logger.log(`\n🔍 Pool ${pool.poolId} exists on-chain, starting real-time monitoring`);
+      
+      // Start real-time monitoring immediately
+      this.startRealTimeMonitoring(pool);
+      this.logger.log(`✅ Real-time monitoring started for pool ${pool.poolId}`);
+
+      // Broadcast pool exists event (but not ready to trade yet)
+      if (this.socketService.isReady()) {
+        this.socketService.broadcastPoolExists(
+          pool.poolId,
+          pool.tokenA,
+          pool.tokenB
+        );
+        this.logger.log(`✅ Pool exists broadcast sent for ${pool.poolId}`);
+      }
+    } catch (error) {
+      this.logger.error(`❌ Error starting monitoring for pool ${pool.poolId}:`, error);
+    }
+  }
+
   public async handlePoolReady(pool: PendingPool) {
     try {
-      this.logger.log(`\n🔍 Processing pool ready event for ${pool.poolId}`);
-      this.logger.log(`Token A: ${pool.tokenA}`);
-      this.logger.log(`Token B: ${pool.tokenB}`);
+      this.logger.log(`\n🚀 Pool ${pool.poolId} is ready to trade!`);
       
-      // Double-check that the pool is actually indexed
-      this.logger.log(`Verifying pool ${pool.poolId} exists on-chain...`);
-      const poolAccount = await this.connection.getAccountInfo(new PublicKey(pool.poolId));
-      
-      if (!poolAccount) {
-        this.logger.warn(`❌ Pool ${pool.poolId} was marked as ready but account not found, skipping broadcast`);
-        return;
+      // Get current pool state
+      const poolState = await this.getPoolState(pool.poolId);
+      if (!poolState) {
+        throw new Error('Pool state not available');
       }
 
-      // Get token info with decimals
+      // Get token info
       const tokenAInfo = MINT_TO_TOKEN[pool.tokenA] || { symbol: pool.tokenA, decimals: 9, mint: pool.tokenA };
       const tokenBInfo = MINT_TO_TOKEN[pool.tokenB] || { symbol: pool.tokenB, decimals: 6, mint: pool.tokenB };
 
-      // Calculate initial price if possible
-      let initialPrice: number | undefined;
-      try {
-        const quoteResult = await this.poolMonitorManager.getInitialQuote(pool.poolId, pool.tokenA, pool.tokenB);
-        if (quoteResult && quoteResult.price) {
-          initialPrice = quoteResult.price;
-        }
-      } catch (error) {
-        this.logger.warn(`Could not calculate initial price for pool ${pool.poolId}: ${error}`);
-      }
+      // Broadcast ready to trade signal
+      if (this.socketService.isReady()) {
+        this.socketService.broadcastNewPool(
+          pool.poolId,
+          pool.tokenA,
+          pool.tokenB,
+          tokenAInfo.decimals,
+          tokenBInfo.decimals,
+          poolState.price
+        );
+        this.logger.log(`✅ Ready to trade broadcast sent for pool ${pool.poolId}`);
 
-      // Only broadcast if we have confirmed the pool exists
-      this.logger.log(`✅ Pool ${pool.poolId} verified as indexed and ready for trading`);
-      this.logger.log(`📢 Preparing to broadcast new pool (${pool.poolId})`);
-      
-      // Check socket service state before broadcasting
-      if (!this.socketService.isReady()) {
-        this.logger.error('❌ Socket service not initialized, cannot broadcast');
-        this.logger.error('Socket service state:', {
-          isInitialized: this.socketService.isReady(),
-          server: this.socketService['server'] ? 'present' : 'missing'
+        // Broadcast initial state
+        this.socketService.broadcastPoolUpdate(pool.poolId, {
+          price: poolState.price,
+          baseReserve: poolState.baseReserve,
+          quoteReserve: poolState.quoteReserve,
+          tvl: poolState.baseReserve * poolState.price + poolState.quoteReserve,
+          volume24h: 0,
+          priceChange: 0,
+          timestamp: Date.now()
         });
-        return;
+        this.logger.log(`✅ Initial state broadcast for pool ${pool.poolId}`);
+      } else {
+        this.logger.error('❌ Socket service not ready, cannot broadcast ready signal');
       }
-      
-      this.logger.log(`Socket service ready, broadcasting pool ${pool.poolId}...`);
-      this.socketService.broadcastNewPool(
-        pool.poolId,
-        pool.tokenA,
-        pool.tokenB,
-        tokenAInfo.decimals,
-        tokenBInfo.decimals,
-        initialPrice
-      );
-      this.logger.log(`✅ Broadcast sent for pool ${pool.poolId}`);
-
-      // Start real-time monitoring after successful broadcast
-      this.logger.log(`Starting real-time monitoring for pool ${pool.poolId}...`);
-      this.startRealTimeMonitoring(pool);
-      this.logger.log(`✅ Real-time monitoring started for pool ${pool.poolId}`);
-      
     } catch (error) {
-      this.logger.error(`❌ Error verifying pool ${pool.poolId}:`, error);
-      this.logger.error('Error details:', {
-        poolId: pool.poolId,
-        tokenA: pool.tokenA,
-        tokenB: pool.tokenB,
-        error: error instanceof Error ? error.message : String(error)
-      });
+      this.logger.error(`❌ Error processing ready state for pool ${pool.poolId}:`, error);
+    }
+  }
+
+  // New methods for readiness checks
+  public async getPoolState(poolId: string): Promise<{
+    price: number;
+    baseReserve: number;
+    quoteReserve: number;
+  } | null> {
+    try {
+      const quoteResult = await this.poolMonitorManager.getInitialQuote(
+        poolId,
+        MINT_TO_TOKEN[poolId]?.mint || poolId,
+        'So11111111111111111111111111111111111111112' // SOL mint
+      );
+      
+      if (quoteResult.price && quoteResult.baseReserve && quoteResult.quoteReserve) {
+        return {
+          price: quoteResult.price,
+          baseReserve: quoteResult.baseReserve,
+          quoteReserve: quoteResult.quoteReserve
+        };
+      }
+      return null;
+    } catch (error) {
+      this.logger.debug(`Error getting pool state for ${poolId}:`, error);
+      return null;
+    }
+  }
+
+  public async isPoolIndexed(poolId: string): Promise<boolean> {
+    try {
+      // Try to get pool info from Raydium API
+      const poolInfo = await this.poolMonitorManager.getPoolInfo(poolId);
+      return !!poolInfo;
+    } catch (error) {
+      this.logger.debug(`Error checking if pool ${poolId} is indexed:`, error);
+      return false;
+    }
+  }
+
+  public async getPoolInfo(poolId: string): Promise<any | null> {
+    try {
+      // Get detailed pool info from Raydium API
+      const poolInfo = await this.poolMonitorManager.getPoolInfo(poolId);
+      if (!poolInfo) {
+        this.logger.debug(`Pool ${poolId} not found in Raydium API`);
+        return null;
+      }
+      return poolInfo;
+    } catch (error) {
+      this.logger.debug(`Error getting pool info for ${poolId}:`, error);
+      return null;
     }
   }
 

@@ -6,10 +6,12 @@ export interface PendingPool {
   poolId: string;
   tokenA: string;
   tokenB: string;
-  state: 'pending' | 'indexed' | 'failed';
+  state: 'pending' | 'exists' | 'ready' | 'failed';
   attempts: number;
   lastChecked: number;
   error?: string;
+  existsSince?: number;
+  lastReadinessCheck?: number;
 }
 
 export class PendingPoolManager {
@@ -20,6 +22,10 @@ export class PendingPoolManager {
   private logger = new Logger(PendingPoolManager.name);
   private poolMonitorService: PoolMonitorService;
   private intervalId: NodeJS.Timeout | null = null;
+  private readonly READINESS_CHECK_INTERVAL = 1000; // 1 second between readiness checks
+  private readonly MAX_READINESS_WAIT = 15 * 60 * 1000; // 15 minutes max wait for readiness
+  private readonly EXISTENCE_CHECK_INTERVAL = 1000; // 1 second between existence checks
+  private readonly MAX_EXISTENCE_ATTEMPTS = 1800; // 30 minutes at 1s intervals
 
   constructor(
     connection: Connection,
@@ -31,8 +37,8 @@ export class PendingPoolManager {
   ) {
     this.connection = connection;
     this.poolMonitorService = poolMonitorService;
-    this.checkInterval = options.checkInterval || 30_000; // 30 seconds default
-    this.maxAttempts = options.maxAttempts || 30; // 30 attempts default
+    this.checkInterval = options.checkInterval || this.EXISTENCE_CHECK_INTERVAL; // 1 second default
+    this.maxAttempts = options.maxAttempts || this.MAX_EXISTENCE_ATTEMPTS; // 1800 attempts = 30 minutes at 1s intervals
   }
 
   addPool(poolId: string, tokenA: string, tokenB: string) {
@@ -65,42 +71,142 @@ export class PendingPoolManager {
 
   private async checkPools() {
     const now = Date.now();
-    const pending = Array.from(this.pools.values()).filter(p => p.state === 'pending');
+    const pending = Array.from(this.pools.values()).filter(p => p.state === 'pending' || p.state === 'exists');
     if (pending.length === 0) {
       this.stop();
       return;
     }
 
-    this.logger.log(`Checking ${pending.length} pending pools...`);
+    this.logger.debug(`Checking ${pending.length} pending pools...`);
     
-    // Batch check existence
-    const pubkeys = pending.map(p => new PublicKey(p.poolId));
-    let infos: (AccountInfo<Buffer> | null)[] = [];
-    try {
-      infos = await this.connection.getMultipleAccountsInfo(pubkeys);
-    } catch (e) {
-      this.logger.error('Batch RPC error:', e);
-      return;
-    }
+    // Process each pool individually for faster response
+    for (const pool of pending) {
+      try {
+        pool.lastChecked = now;
+        pool.attempts++;
+        
+        // Get pool info directly
+        const info = await this.connection.getAccountInfo(new PublicKey(pool.poolId));
+        
+        if (info) {
+          if (pool.state === 'pending') {
+            // Pool just found to exist
+            pool.state = 'exists';
+            pool.existsSince = now;
+            pool.lastReadinessCheck = now;
+            this.logger.log(`Pool ${pool.poolId} exists on-chain, starting readiness checks`);
+            this.poolMonitorService.handlePoolExists(pool);
+          }
 
-    pending.forEach((pool, i) => {
-      pool.lastChecked = now;
-      pool.attempts++;
-      const info = infos[i];
-      
-      if (info) {
-        // Pool exists on-chain, mark as indexed and notify PoolMonitorService
-        pool.state = 'indexed';
-        this.logger.log(`Pool ${pool.poolId} is now indexed, notifying PoolMonitorService`);
-        this.poolMonitorService.handlePoolReady(pool);
-        this.pools.delete(pool.poolId);
-      } else if (pool.attempts >= this.maxAttempts) {
-        pool.state = 'failed';
-        pool.error = 'Not found after max attempts';
-        this.logger.warn(`Pool ${pool.poolId} failed after ${this.maxAttempts} attempts`);
-        this.pools.delete(pool.poolId);
+          // Check if it's time for a readiness check
+          if (pool.state === 'exists' && 
+              now - (pool.lastReadinessCheck || 0) >= this.READINESS_CHECK_INTERVAL) {
+            pool.lastReadinessCheck = now;
+            
+            try {
+              const isReady = await this.checkPoolReadiness(pool);
+              if (isReady) {
+                pool.state = 'ready';
+                this.logger.log(`Pool ${pool.poolId} is now ready to trade!`);
+                this.poolMonitorService.handlePoolReady(pool);
+                this.pools.delete(pool.poolId);
+              } else if (now - (pool.existsSince || now) > this.MAX_READINESS_WAIT) {
+                pool.state = 'failed';
+                pool.error = 'Not ready after max wait time';
+                this.logger.warn(`Pool ${pool.poolId} failed: ${pool.error}`);
+                this.pools.delete(pool.poolId);
+              }
+            } catch (error) {
+              this.logger.warn(`Readiness check failed for pool ${pool.poolId}:`, error);
+            }
+          }
+        } else if (pool.attempts >= this.maxAttempts) {
+          pool.state = 'failed';
+          pool.error = 'Not found after max attempts';
+          this.logger.warn(`Pool ${pool.poolId} failed after ${this.maxAttempts} attempts`);
+          this.pools.delete(pool.poolId);
+        }
+      } catch (error) {
+        this.logger.error(`Error checking pool ${pool.poolId}:`, error);
       }
-    });
+    }
+  }
+
+  private async checkPoolReadiness(pool: PendingPool): Promise<boolean> {
+    try {
+      // Get pool state
+      const poolState = await this.poolMonitorService.getPoolState(pool.poolId);
+      if (!poolState) {
+        this.logger.debug(`Pool ${pool.poolId} state not yet available`);
+        return false;
+      }
+
+      // Check if pool is indexed
+      const isIndexed = await this.poolMonitorService.isPoolIndexed(pool.poolId);
+      if (!isIndexed) {
+        this.logger.debug(`Pool ${pool.poolId} not yet indexed by Raydium API`);
+        return false;
+      }
+
+      // Get detailed pool info
+      const poolInfo = await this.poolMonitorService.getPoolInfo(pool.poolId);
+      if (!poolInfo) {
+        this.logger.debug(`Pool ${pool.poolId} not found in Raydium API`);
+        return false;
+      }
+
+      // Check if pool is properly initialized
+      if (!poolInfo.id || !poolInfo.mintA || !poolInfo.mintB) {
+        this.logger.debug(`Pool ${pool.poolId} not fully initialized in Raydium API`);
+        return false;
+      }
+
+      // Check if both vaults have non-zero reserves
+      if (!poolState.baseReserve || !poolState.quoteReserve || 
+          poolState.baseReserve === 0 || poolState.quoteReserve === 0) {
+        this.logger.debug(`Pool ${pool.poolId} reserves not yet initialized:
+          Base Reserve: ${poolState.baseReserve}
+          Quote Reserve: ${poolState.quoteReserve}`);
+        return false;
+      }
+
+      // Check if we can get a valid price
+      if (!poolState.price || poolState.price <= 0) {
+        this.logger.debug(`Pool ${pool.poolId} price not yet valid: ${poolState.price}`);
+        return false;
+      }
+
+      // Check if pool has proper token info
+      if (!poolInfo.mintA.symbol || !poolInfo.mintB.symbol || 
+          !poolInfo.mintA.decimals || !poolInfo.mintB.decimals) {
+        this.logger.debug(`Pool ${pool.poolId} token info not complete:
+          Base Token: ${poolInfo.mintA.symbol} (${poolInfo.mintA.decimals} decimals)
+          Quote Token: ${poolInfo.mintB.symbol} (${poolInfo.mintB.decimals} decimals)`);
+        return false;
+      }
+
+      // Check if pool has proper program info
+      if (!poolInfo.programId || !poolInfo.authority) {
+        this.logger.debug(`Pool ${pool.poolId} program info not complete:
+          Program ID: ${poolInfo.programId}
+          Authority: ${poolInfo.authority}`);
+        return false;
+      }
+
+      // All checks passed
+      this.logger.log(`Pool ${pool.poolId} is ready to trade:
+        Base Token: ${poolInfo.mintA.symbol} (${poolInfo.mintA.decimals} decimals)
+        Quote Token: ${poolInfo.mintB.symbol} (${poolInfo.mintB.decimals} decimals)
+        Price: ${poolState.price}
+        Base Reserve: ${poolState.baseReserve}
+        Quote Reserve: ${poolState.quoteReserve}
+        TVL: ${poolState.baseReserve * poolState.price + poolState.quoteReserve}`);
+
+      return true;
+    } catch (error) {
+      this.logger.debug(`Readiness check error for pool ${pool.poolId}:`, error);
+      return false;
+    }
   }
 
   getPendingPools() {

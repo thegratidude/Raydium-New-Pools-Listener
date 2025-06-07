@@ -3,6 +3,7 @@ config();
 import { PoolMonitorManager } from './pool-monitor-manager';
 import fetch from 'node-fetch';
 import { Connection } from '@solana/web3.js';
+import { conciseOnUpdate, TrendDirection } from './types';
 
 const HTTP_URL = process.env.HTTP_URL!;
 const WSS_URL = process.env.WSS_URL!;
@@ -11,7 +12,7 @@ const WSS_URL = process.env.WSS_URL!;
 const poolDiscoveryResult = {
   poolId: '58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2',
   baseMint: 'So11111111111111111111111111111111111111112',
-  quoteMint: 'EPjFWdd5AufqSSqeM2qAqAqAqAqAqAqAqAqAqAqAqAqA',
+  quoteMint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
   lpMint: '',
   isViable: true,
 };
@@ -41,17 +42,34 @@ function formatUSD(n: number) {
   return n.toLocaleString('en-US', { maximumFractionDigits: 0, minimumFractionDigits: 0 });
 }
 
-manager.addPool(poolDiscoveryResult, tokenA, tokenB, (snapshot, pressure) => {
-  // Convert reserves to USD
-  const baseUSD = tokenA.symbol === 'SOL' ? snapshot.baseReserve * solPrice : snapshot.baseReserve;
-  const quoteUSD = tokenB.symbol === 'SOL' ? snapshot.quoteReserve * solPrice : snapshot.quoteReserve;
-  // Concise output: SYMBOLS | Price | TVL | Base($) | Quote($) | BuyP | Rug | Trend
-  console.log(
-    `${tokenA.symbol}/${tokenB.symbol} | $${snapshot.price.toFixed(4)} | TVL $${formatUSD(snapshot.tvl)} | ` +
-    `Base $${formatUSD(baseUSD)} | Quote $${formatUSD(quoteUSD)} | ` +
-    `BuyP ${pressure.buyPressure} | Rug ${pressure.rugRisk} | ${pressure.trend}`
+// Start monitoring
+manager.addPool(poolDiscoveryResult, tokenA, tokenB, (snapshot) => {
+  // Use conciseOnUpdate for logging
+  conciseOnUpdate(
+    snapshot,
+    snapshot.pressure || { 
+      direction: TrendDirection.Sideways, 
+      strength: 0, // neutral strength as a number
+      value: 0, 
+      buyPressure: 0, 
+      sellPressure: 0, 
+      rugRisk: 0, 
+      trend: TrendDirection.Sideways,
+      severity: 'low'
+    },
+    tokenA,
+    tokenB,
+    snapshot.originPrice || null,
+    snapshot.originBaseReserve || null,
+    snapshot.originQuoteReserve || null,
+    snapshot.previousSnapshot || null,
+    snapshot.poolId
   );
 });
 
-// Keep process alive
-process.stdin.resume(); 
+// Keep the process running
+console.log('Test monitor running... Press Ctrl+C to stop');
+process.on('SIGINT', () => {
+  console.log('Stopping test monitor...');
+  process.exit(0);
+}); 

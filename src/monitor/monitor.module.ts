@@ -13,7 +13,12 @@ import { GatewayModule } from '../gateway/gateway.module';
       provide: Connection,
       useFactory: () => {
         const HTTP_URL = process.env.HTTP_URL!;
-        return new Connection(HTTP_URL);
+        const WS_URL = process.env.WSS_URL!;
+        return new Connection(HTTP_URL, {
+          commitment: 'confirmed',
+          wsEndpoint: WS_URL,
+          confirmTransactionInitialTimeout: 60000
+        });
       },
     },
   ],

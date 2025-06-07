@@ -191,6 +191,32 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
     this.server.emit('pool_update', message);
   }
 
+  broadcastPoolExists(poolId: string, baseMint: string, quoteMint: string) {
+    if (!this.isInitialized || !this.server) {
+      this.logger.error('Socket.IO server not started');
+      return;
+    }
+
+    const message = {
+      type: 'pool_exists',
+      poolId,
+      baseMint,
+      quoteMint,
+      timestamp: new Date().toISOString(),
+    };
+
+    // Log pool existence with clear formatting
+    this.logger.log('\n' + '-'.repeat(80));
+    this.logger.log(`🔍 POOL EXISTS ON-CHAIN`);
+    this.logger.log(`Pool ID: ${poolId}`);
+    this.logger.log(`Base Mint: ${baseMint}`);
+    this.logger.log(`Quote Mint: ${quoteMint}`);
+    this.logger.log(`Time: ${new Date().toISOString()}`);
+    this.logger.log('-'.repeat(80) + '\n');
+
+    this.server.emit('pool_exists', message);
+  }
+
   private startHealthChecks() {
     if (this.healthCheckInterval) {
       clearInterval(this.healthCheckInterval);
