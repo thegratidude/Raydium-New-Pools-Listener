@@ -246,8 +246,8 @@ export class PendingPoolManager {
       poolInfo.lastReadinessCheck = now;
       const attempts = (poolInfo.attempts || 0) + 1;
 
-      // Log readiness check attempt
-      this.logger.log(`Checking pool ${poolId} readiness (Attempt ${attempts})`);
+      // Only log readiness checks at debug level
+      this.logger.debug(`Checking pool ${poolId} readiness (Attempt ${attempts})`);
 
       // Update last readiness check in database
       await this.db.updatePendingPool(poolId, {
@@ -259,7 +259,7 @@ export class PendingPoolManager {
       const accountInfo = await this.connection.getAccountInfo(new PublicKey(poolId));
       if (!accountInfo) {
         if (attempts >= this.maxAttempts) {
-          this.logger.log(`Pool ${poolId} failed: Max attempts (${this.maxAttempts}) reached without success`);
+          this.logger.log(`❌ Pool ${poolId} failed: Max attempts (${this.maxAttempts}) reached without success`);
           await this.updatePoolState(poolId, 'failed', {
             error: 'Max attempts reached without success',
             last_checked: now,
@@ -273,22 +273,28 @@ export class PendingPoolManager {
       // If we have pool info, check if it's ready
       const isReady = await this.isPoolReady(accountInfo);
       if (isReady) {
-        this.logger.log(`Pool ${poolId} is now ready for trading!`);
+        // Make trade ready signal very visible
+        console.log('\n' + '='.repeat(50));
+        console.log('🚀 POOL READY FOR TRADING!');
+        console.log('='.repeat(50));
+        console.log(`Pool ID: ${poolId}`);
+        console.log(`Time to Ready: ${this.formatElapsedTime(poolInfo.firstSeen)}`);
+        console.log(`Total Attempts: ${attempts}`);
+        console.log('='.repeat(50) + '\n');
+        
         await this.updatePoolState(poolId, 'ready', {
           ready_since: now
         });
       } else {
         const timeSinceExists = now - (poolInfo.existsSince || now);
         if (timeSinceExists > this.maxWaitTime) {
-          this.logger.log(`Pool ${poolId} failed: Not ready after ${this.formatElapsedTime(poolInfo.existsSince || now)}`);
+          this.logger.log(`❌ Pool ${poolId} failed: Not ready after ${this.formatElapsedTime(poolInfo.existsSince || now)}`);
           await this.updatePoolState(poolId, 'failed', {
             error: 'Not ready after max wait time',
             last_checked: now,
             attempts,
             failed_at: now
           });
-        } else {
-          this.logger.debug(`Pool ${poolId} not ready yet (Attempt ${attempts})`);
         }
       }
     } catch (err) {
@@ -501,13 +507,23 @@ export class PendingPoolManager {
   private formatElapsedTime(startTime: number): string {
     const now = getCurrentTimestamp();
     const elapsedMs = now - startTime;
-    const minutes = Math.floor(elapsedMs / 60000);
-    const seconds = Math.floor((elapsedMs % 60000) / 1000);
+    
+    // Convert to seconds first to avoid floating point issues
+    const totalSeconds = Math.floor(elapsedMs / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    
+    // Ensure we show at least 1 second if there's any time elapsed
+    if (totalSeconds === 0 && elapsedMs > 0) {
+      return '0m 1s';
+    }
+    
     return `${minutes}m ${seconds}s`;
   }
 
   private async printStatusUpdate(): Promise<void> {
     const poolsByState = new Map<PoolState, PendingPoolInfo[]>();
+    const now = getCurrentTimestamp();
     
     // Group pools by state
     for (const pool of this.pendingPools.values()) {
@@ -542,7 +558,9 @@ export class PendingPoolManager {
       for (const pool of pools) {
         const elapsedTime = this.formatElapsedTime(pool.firstSeen);
         const attempts = pool.attempts || 0;
-        console.log(`  • ${pool.poolId} (${elapsedTime}, ${attempts} attempts)`);
+        const timeSinceLastCheck = now - (pool.lastChecked || pool.firstSeen);
+        const checkInterval = Math.floor(timeSinceLastCheck / 1000); // Convert to seconds
+        console.log(`  • ${pool.poolId} (${elapsedTime}, ${attempts} attempts, last check ${checkInterval}s ago)`);
       }
       console.log('----------------------------------------\n');
     }
