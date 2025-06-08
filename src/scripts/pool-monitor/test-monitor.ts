@@ -158,6 +158,7 @@ async function testMonitor() {
         `Base: ${formatChange(baseReservesChange)} | ` +
         `Vol: ${formatChange(volumeChange)} | ` +
         `Price: ${formatChange(priceChangeSinceStart)} | ` +
+        `WSOL: $${currentPrice.toFixed(2)} | ` +
         `Slippage(1${baseSymbol}): ${slippage.toFixed(3)}% | ` +
         `TVL: $${reserves.totalLiquidity.toLocaleString(undefined, {maximumFractionDigits: 0})}`
       );
