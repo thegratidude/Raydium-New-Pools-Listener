@@ -4,6 +4,7 @@ import { DatabaseManager } from './db-manager.js';
 import { getCurrentTimestamp } from './db-schema.js';
 import { Api } from '@raydium-io/raydium-sdk-v2';
 import { decodeRaydiumPoolState } from './raydium-layout.js';
+import { insertPoolHistory } from './pool-history-db.js';
 
 type PoolState = 'pending' | 'exists' | 'ready' | 'failed';
 
@@ -47,6 +48,11 @@ export class PendingPoolManager {
   private readonly checkInterval: number = 1000; // 1 second
   private readonly maxAttempts: number = 1800; // 30 minutes worth of attempts
   private readonly statusUpdateInterval: number = 60 * 1000; // 1 minute
+  private readonly CLEANUP_AGE_MS: number = 2 * 60 * 60 * 1000; // 2 hours
+  private readonly RPC_RATE_LIMIT_DELAY = 2000; // 2 seconds between RPC calls
+  private readonly MAX_RPC_RETRIES = 5;
+  private lastRpcCall: number = 0;
+  private rpcRetryDelays: Map<string, number> = new Map();
   private db: DatabaseManager;
   private connection: Connection;
   private logger = new Logger(PendingPoolManager.name);
@@ -66,6 +72,7 @@ export class PendingPoolManager {
 
   async init() {
     await this.db.init();
+    await this.cleanupOldPools();
     await this.loadExistingPools();
     this.start();
   }
@@ -101,18 +108,23 @@ export class PendingPoolManager {
   }
 
   private async loadExistingPools(): Promise<void> {
-    const pool = await this.db.getPendingPool('pending');
-    if (pool) {
+    try {
+      const pools = await this.db.getAllPendingPools();
+      for (const pool of pools) {
         this.pendingPools.set(pool.pool_id, {
-            poolId: pool.pool_id,
-            state: pool.state,
-            firstSeen: pool.first_seen,
-            existsSince: pool.exists_since,
-            lastChecked: pool.last_checked,
-            lastReadinessCheck: pool.last_readiness_check,
-            attempts: pool.attempts || 0,
-            error: pool.error
+          poolId: pool.pool_id,
+          state: pool.state,
+          firstSeen: pool.first_seen,
+          existsSince: pool.exists_since,
+          lastChecked: pool.last_checked,
+          lastReadinessCheck: pool.last_readiness_check,
+          attempts: pool.attempts || 0,
+          error: pool.error
         });
+      }
+      this.logger.log(`Loaded ${pools.length} existing pools from database`);
+    } catch (err) {
+      this.logger.error('Error loading existing pools:', err);
     }
   }
 
@@ -184,47 +196,46 @@ export class PendingPoolManager {
     }
   }
 
-  public async checkPools(): Promise<void> {
+  private async makeRpcCall<T>(operation: () => Promise<T>, poolId: string): Promise<T> {
     const now = getCurrentTimestamp();
+    const retryDelay = this.rpcRetryDelays.get(poolId) || this.RPC_RATE_LIMIT_DELAY;
     
-    for (const [poolId, poolInfo] of this.pendingPools.entries()) {
-      if (poolInfo.state === 'ready' || poolInfo.state === 'failed') {
-        continue;
-      }
+    // Ensure minimum delay between RPC calls
+    const timeSinceLastCall = now - this.lastRpcCall;
+    if (timeSinceLastCall < retryDelay) {
+      await new Promise(resolve => setTimeout(resolve, retryDelay - timeSinceLastCall));
+    }
 
-      const timeSinceFirstSeen = now - poolInfo.firstSeen;
-      if (timeSinceFirstSeen > this.maxWaitTime) {
-        await this.updatePoolState(poolId, 'failed', {
-          error: 'Max wait time exceeded',
-          last_checked: now,
-          attempts: (poolInfo.attempts || 0) + 1,
-          failed_at: now
-        });
-        continue;
-      }
-
-      const attempts = (poolInfo.attempts || 0) + 1;
-      poolInfo.attempts = attempts;
-      poolInfo.lastChecked = now;
-
-      // Update attempts in database
-      await this.db.updatePendingPool(poolId, {
-        attempts,
-        last_checked: now,
-        updated_at: now
-      });
-
-      if (poolInfo.state === 'pending') {
-        await this.checkPoolExists(poolId);
-      } else if (poolInfo.state === 'exists') {
-        await this.checkPoolReadiness(poolId);
+    let attempts = 0;
+    while (attempts < this.MAX_RPC_RETRIES) {
+      try {
+        this.lastRpcCall = getCurrentTimestamp();
+        const result = await operation();
+        // Reset retry delay on success
+        this.rpcRetryDelays.set(poolId, this.RPC_RATE_LIMIT_DELAY);
+        return result;
+      } catch (err: any) {
+        attempts++;
+        if (err?.message?.includes('429') || err?.message?.includes('rate limited')) {
+          // Exponential backoff: 2s, 4s, 8s, 16s, 32s
+          const newDelay = Math.min(retryDelay * 2, 32000);
+          this.rpcRetryDelays.set(poolId, newDelay);
+          this.logger.warn(`Rate limited for pool ${poolId}, retrying in ${newDelay}ms (attempt ${attempts}/${this.MAX_RPC_RETRIES})`);
+          await new Promise(resolve => setTimeout(resolve, newDelay));
+        } else {
+          throw err;
+        }
       }
     }
+    throw new Error(`Failed after ${this.MAX_RPC_RETRIES} retries for pool ${poolId}`);
   }
 
   private async checkPoolExists(poolId: string): Promise<boolean> {
     try {
-      const exists = await this.connection.getAccountInfo(new PublicKey(poolId));
+      const exists = await this.makeRpcCall(
+        () => this.connection.getAccountInfo(new PublicKey(poolId)),
+        poolId
+      );
       if (exists) {
         await this.updatePoolState(poolId, 'exists', {
           exists_since: getCurrentTimestamp()
@@ -232,7 +243,7 @@ export class PendingPoolManager {
       }
       return !!exists;
     } catch (err) {
-      console.error(`[PendingPoolManager] Error checking pool existence for ${poolId}:`, err);
+      this.logger.error(`Error checking pool existence for ${poolId}:`, err);
       return false;
     }
   }
@@ -256,7 +267,10 @@ export class PendingPoolManager {
         attempts
       });
 
-      const accountInfo = await this.connection.getAccountInfo(new PublicKey(poolId));
+      const accountInfo = await this.makeRpcCall(
+        () => this.connection.getAccountInfo(new PublicKey(poolId)),
+        poolId
+      );
       if (!accountInfo) {
         if (attempts >= this.maxAttempts) {
           this.logger.log(`❌ Pool ${poolId} failed: Max attempts (${this.maxAttempts}) reached without success`);
@@ -337,24 +351,66 @@ export class PendingPoolManager {
         // Get pool metrics
         const tvl = pool.tvl || 0;
         const volume24h = pool.day?.volume || 0;
+        const price = pool.price || 0;
+        const baseReserve = pool.mintAmountA || 0;
+        const quoteReserve = pool.mintAmountB || 0;
 
-        // Log metrics for debugging
-        this.logger.debug(`Pool ${poolState.baseMint} metrics: TVL=$${tvl}, 24h Volume=$${volume24h}`);
+        // Log detailed metrics for debugging
+        this.logger.debug(`Pool ${poolState.baseMint} metrics:
+          TVL: $${tvl.toLocaleString()}
+          Price: $${price.toFixed(8)}
+          24h Volume: $${volume24h.toLocaleString()}
+          Base Reserve: ${baseReserve}
+          Quote Reserve: ${quoteReserve}
+          Token A: ${pool.mintA.symbol || 'Unknown'} (${pool.mintA.address})
+          Token B: ${pool.mintB.symbol || 'Unknown'} (${pool.mintB.address})
+        `);
 
-        // Check minimum requirements
-        if (tvl < 45000) {
-          this.logger.debug(`Pool ${poolState.baseMint} has insufficient TVL: $${tvl}`);
-          return false;
+        // Check if pool is trade-ready in Raydium UI sense
+        // A pool is considered ready if:
+        // 1. It has a valid price (non-zero)
+        // 2. It has a valid TVL (non-zero)
+        // 3. It has valid reserves (both tokens have non-zero amounts)
+        const isTradeReady = price > 0 && tvl > 0 && baseReserve > 0 && quoteReserve > 0;
+
+        if (isTradeReady) {
+          this.logger.log(`Pool ${poolState.baseMint} is trade-ready in Raydium UI:
+            Price: $${price.toFixed(8)}
+            TVL: $${tvl.toLocaleString()}
+            Base Reserve: ${baseReserve}
+            Quote Reserve: ${quoteReserve}
+          `);
+        } else {
+          this.logger.debug(`Pool ${poolState.baseMint} not yet trade-ready:
+            Price: ${price > 0 ? 'valid' : 'invalid'}
+            TVL: ${tvl > 0 ? 'valid' : 'invalid'}
+            Base Reserve: ${baseReserve > 0 ? 'valid' : 'invalid'}
+            Quote Reserve: ${quoteReserve > 0 ? 'valid' : 'invalid'}
+          `);
         }
 
-        if (volume24h < 5000) {
-          this.logger.debug(`Pool ${poolState.baseMint} has insufficient 24h volume: $${volume24h}`);
-          return false;
+        // Write pool metrics to history database
+        try {
+          await insertPoolHistory({
+            poolId: poolState.baseMint,
+            baseSymbol: pool.mintA.symbol || 'Unknown',
+            quoteSymbol: pool.mintB.symbol || 'Unknown',
+            timestamp: Math.floor(Date.now() / 1000),
+            price: price,
+            tvl: tvl,
+            baseReserve: baseReserve,
+            quoteReserve: quoteReserve,
+            buyPressure: 0,  // Not available in API
+            rugRisk: 0,  // Not available in API
+            trend: 'neutral',  // Not available in API
+            volume: volume24h
+          });
+          this.logger.debug(`Updated pool history for ${poolState.baseMint}`);
+        } catch (err) {
+          this.logger.error(`Failed to write pool history for ${poolState.baseMint}:`, err);
         }
 
-        // Pool meets all criteria
-        this.logger.log(`Pool ${poolState.baseMint} is ready for monitoring (TVL: $${tvl.toLocaleString()}, 24h Volume: $${volume24h.toLocaleString()})`);
-        return true;
+        return isTradeReady;
 
       } catch (error: any) {
         // Handle rate limiting
@@ -381,126 +437,50 @@ export class PendingPoolManager {
     this.pendingPools.delete(poolId);
   }
 
-  private async checkPool(poolId: string, poolInfo: PendingPoolInfo): Promise<void> {
+  private async checkPools(): Promise<void> {
     const now = getCurrentTimestamp();
-    const timeSinceFirstSeen = now - poolInfo.firstSeen;
+    
+    // Process pools in batches to avoid overwhelming RPC
+    const pools = Array.from(this.pendingPools.entries());
+    for (let i = 0; i < pools.length; i++) {
+      const [poolId, poolInfo] = pools[i];
+      
+      if (poolInfo.state === 'ready' || poolInfo.state === 'failed') {
+        continue;
+      }
 
-    if (timeSinceFirstSeen > this.maxWaitTime) {
-        const updates: Partial<PendingPool> = {
-            state: 'failed',
-            error: 'Max wait time exceeded',
-            last_checked: now,
-            attempts: poolInfo.attempts + 1
-        };
-        await this.db.updatePendingPool(poolId, updates);
-        this.pendingPools.delete(poolId);
-        return;
-    }
-
-    if (poolInfo.attempts >= this.maxAttempts) {
-        const updates: Partial<PendingPool> = {
-            state: 'failed',
-            error: 'Max attempts reached without success',
-            last_checked: now,
-            attempts: poolInfo.attempts + 1
-        };
-        await this.db.updatePendingPool(poolId, updates);
-        this.pendingPools.delete(poolId);
-        return;
-    }
-
-    // Check if pool exists
-    const exists = await this.checkPoolExists(poolId);
-    if (!exists) {
-        const updates: Partial<PendingPool> = {
-            state: 'pending',
-            last_checked: now,
-            attempts: poolInfo.attempts + 1
-        };
-        await this.db.updatePendingPool(poolId, updates);
-        this.updatePoolInfo(poolId, {
-            state: 'pending',
-            lastChecked: now,
-            attempts: poolInfo.attempts + 1
+      const timeSinceFirstSeen = now - poolInfo.firstSeen;
+      if (timeSinceFirstSeen > this.maxWaitTime) {
+        await this.updatePoolState(poolId, 'failed', {
+          error: 'Max wait time exceeded',
+          last_checked: now,
+          attempts: (poolInfo.attempts || 0) + 1,
+          failed_at: now
         });
-        return;
-    }
+        continue;
+      }
 
-    // Update to exists state if not already
-    if (poolInfo.state === 'pending') {
-        const updates: Partial<PendingPool> = {
-            state: 'exists',
-            exists_since: now,
-            last_checked: now,
-            attempts: poolInfo.attempts + 1
-        };
-        await this.db.updatePendingPool(poolId, updates);
-        this.updatePoolInfo(poolId, {
-            state: 'exists',
-            existsSince: now,
-            lastChecked: now,
-            attempts: poolInfo.attempts + 1
-        });
-        return;
-    }
+      const attempts = (poolInfo.attempts || 0) + 1;
+      poolInfo.attempts = attempts;
+      poolInfo.lastChecked = now;
 
-    // Check if pool is ready
-    const isReady = await this.checkPoolReady(poolId);
-    if (isReady) {
-        const updates: Partial<PendingPool> = {
-            state: 'ready',
-            last_checked: now,
-            last_readiness_check: now,
-            attempts: poolInfo.attempts + 1
-        };
-        await this.db.updatePendingPool(poolId, updates);
-        this.pendingPools.delete(poolId);
-        return;
-    }
-
-    // Check if we've waited too long for readiness
-    const timeSinceExists = poolInfo.existsSince ? now - poolInfo.existsSince : 0;
-    if (timeSinceExists > this.maxReadyWaitTime) {
-        const updates: Partial<PendingPool> = {
-            state: 'failed',
-            error: 'Not ready after max wait time',
-            last_checked: now,
-            last_readiness_check: now,
-            attempts: poolInfo.attempts + 1
-        };
-        await this.db.updatePendingPool(poolId, updates);
-        this.pendingPools.delete(poolId);
-        return;
-    }
-
-    // Update last check time
-    const updates: Partial<PendingPool> = {
-        state: 'exists',
+      // Update attempts in database
+      await this.db.updatePendingPool(poolId, {
+        attempts,
         last_checked: now,
-        attempts: poolInfo.attempts + 1
-    };
-    await this.db.updatePendingPool(poolId, updates);
-    this.updatePoolInfo(poolId, {
-        lastChecked: now,
-        attempts: poolInfo.attempts + 1
-    });
-  }
+        updated_at: now
+      });
 
-  private updatePoolInfo(poolId: string, updates: Partial<PendingPoolInfo>): void {
-    const poolInfo = this.pendingPools.get(poolId);
-    if (poolInfo) {
-      this.pendingPools.set(poolId, { ...poolInfo, ...updates });
-    }
-  }
+      // Add delay between pool checks
+      if (i < pools.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, this.RPC_RATE_LIMIT_DELAY));
+      }
 
-  private async checkPoolReady(poolId: string): Promise<boolean> {
-    try {
-      const accountInfo = await this.connection.getAccountInfo(new PublicKey(poolId));
-      if (!accountInfo) return false;
-      return await this.isPoolReady(accountInfo);
-    } catch (err) {
-      this.logger.error(`Error checking pool readiness for ${poolId}:`, err);
-      return false;
+      if (poolInfo.state === 'pending') {
+        await this.checkPoolExists(poolId);
+      } else if (poolInfo.state === 'exists') {
+        await this.checkPoolReadiness(poolId);
+      }
     }
   }
 
@@ -510,15 +490,19 @@ export class PendingPoolManager {
     
     // Convert to seconds first to avoid floating point issues
     const totalSeconds = Math.floor(elapsedMs / 1000);
-    const minutes = Math.floor(totalSeconds / 60);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
     const seconds = totalSeconds % 60;
     
-    // Ensure we show at least 1 second if there's any time elapsed
-    if (totalSeconds === 0 && elapsedMs > 0) {
-      return '0m 1s';
+    // Format based on duration
+    if (hours > 0) {
+      return `${hours}h ${minutes}m ${seconds}s`;
+    } else if (minutes > 0) {
+      return `${minutes}m ${seconds}s`;
+    } else {
+      // For very short durations, show at least 1 second
+      return `${Math.max(1, seconds)}s`;
     }
-    
-    return `${minutes}m ${seconds}s`;
   }
 
   private async printStatusUpdate(): Promise<void> {
@@ -560,9 +544,39 @@ export class PendingPoolManager {
         const attempts = pool.attempts || 0;
         const timeSinceLastCheck = now - (pool.lastChecked || pool.firstSeen);
         const checkInterval = Math.floor(timeSinceLastCheck / 1000); // Convert to seconds
-        console.log(`  • ${pool.poolId} (${elapsedTime}, ${attempts} attempts, last check ${checkInterval}s ago)`);
+        const lastCheckStr = checkInterval < 60 ? `${checkInterval}s` : `${Math.floor(checkInterval / 60)}m ${checkInterval % 60}s`;
+        console.log(`  • ${pool.poolId} (${elapsedTime}, ${attempts} attempts, last check ${lastCheckStr} ago)`);
       }
       console.log('----------------------------------------\n');
+    }
+  }
+
+  private async cleanupOldPools(): Promise<void> {
+    const now = getCurrentTimestamp();
+    const cutoffTime = now - this.CLEANUP_AGE_MS;
+    
+    try {
+      // Get all pending pools older than 2 hours
+      const oldPools = await this.db.getOldPools(cutoffTime);
+      
+      for (const pool of oldPools) {
+        // Only clean up pools that are still in pending state
+        if (pool.state === 'pending') {
+          await this.db.updatePendingPool(pool.pool_id, {
+            state: 'failed',
+            error: 'Cleaned up due to age (2+ hours in pending state)',
+            failed_at: now,
+            updated_at: now
+          });
+          this.logger.log(`Cleaned up old pending pool ${pool.pool_id}`);
+        }
+        // Remove from memory if present
+        this.pendingPools.delete(pool.pool_id);
+      }
+      
+      this.logger.log(`Cleaned up ${oldPools.length} old pending pools`);
+    } catch (err) {
+      this.logger.error('Error during pool cleanup:', err);
     }
   }
 } 

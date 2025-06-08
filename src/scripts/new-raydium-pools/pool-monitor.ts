@@ -7,10 +7,10 @@ import {
   PoolReserves,
   TradeActivity,
   PriceState
-} from '../pool-monitor/types/monitor.types';
+} from '../pool-monitor/types/monitor.types.js';
 import { Api } from '@raydium-io/raydium-sdk-v2';
-import { analyzePool } from '../pool-analyzer/analyzer';
-import { PoolMonitor as RealTimeMonitor } from '../pool-monitor/monitor';
+import { analyzePool } from '../pool-analyzer/analyzer.js';
+import { PoolMonitor as RealTimeMonitor } from '../pool-monitor/monitor.js';
 
 // Constants
 const RAYDIUM_PUBLIC_KEY = '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8';

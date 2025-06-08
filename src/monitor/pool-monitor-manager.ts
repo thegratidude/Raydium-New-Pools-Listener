@@ -1,8 +1,31 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Connection, PublicKey } from '@solana/web3.js';
-import { PoolMonitor } from './pool-monitor';
-import { PoolInfo, TokenInfo, PoolUpdateCallback, PoolSnapshot, MarketPressure, TrendDirection } from './types';
 import { Api } from '@raydium-io/raydium-sdk-v2';
+import { PoolMonitor } from './pool-monitor.js';
+import { PoolInfo, TokenInfo, PoolUpdateCallback, PoolSnapshot, MarketPressure, TrendDirection } from './types.js';
+import { DatabaseManager } from './db-manager.js';
+import { getCurrentTimestamp } from './db-schema.js';
+
+interface PoolStats {
+    pool_id: string;
+    first_seen: number;
+    last_updated: number;
+    total_snapshots: number;
+    avg_price: number;
+    avg_tvl: number;
+    total_volume: number;
+    total_trades: number;
+    max_price: number;
+    min_price: number;
+    max_tvl: number;
+    min_tvl: number;
+    price_volatility: number;
+    tvl_volatility: number;
+    avg_market_pressure: number;
+    max_market_pressure: number;
+    suspicious_count: number;
+    avg_risk_score: number;
+}
 
 @Injectable()
 export class PoolMonitorManager {
@@ -14,6 +37,7 @@ export class PoolMonitorManager {
     onUpdate: PoolUpdateCallback;
     lastUpdate: number;
     monitor?: PoolMonitor;
+    lastSnapshot?: PoolSnapshot;
   }> = new Map();
   private api: Api;
   private reconnectAttempts: number = 0;
@@ -27,10 +51,21 @@ export class PoolMonitorManager {
   private readonly MAX_CONSECUTIVE_FAILURES = 5; // Require more consecutive failures before reconnecting
   private lastHealthCheckTime: number = Date.now();
   private readonly HEALTH_CHECK_TIMEOUT = 10000; // 10 second timeout for health checks
+  private monitors: Map<string, PoolMonitor> = new Map();
+  private db: DatabaseManager;
+  private readonly snapshotInterval: number = 1000; // 1 second
+  private readonly significantPriceChange = 0.05; // 5%
+  private readonly significantTvlChange = 0.1; // 10%
+  private subscribers: Map<string, Set<(update: PoolSnapshot) => void>> = new Map();
 
   constructor(private readonly connection: Connection) {
     this.api = new Api({ cluster: 'mainnet', timeout: 30000 });
     this.setupConnectionHandlers();
+    this.db = new DatabaseManager();
+  }
+
+  async onModuleInit() {
+    await this.db.init();
   }
 
   private setupConnectionHandlers() {
@@ -168,134 +203,74 @@ export class PoolMonitorManager {
     this.logger.debug(`Triggered state update for pool ${poolId}`);
   }
 
-  async addPool(
-    poolInfo: PoolInfo,
-    baseToken: TokenInfo,
-    quoteToken: TokenInfo,
-    onUpdate: PoolUpdateCallback
-  ) {
-    try {
-      // Verify pool exists and is accessible before adding
-      const poolState = await this.connection.getAccountInfo(new PublicKey(poolInfo.poolId));
-      if (!poolState) {
-        this.logger.warn(`Pool ${poolInfo.poolId} not found on chain, skipping`);
-        return;
-      }
+  public async addPool(
+    poolId: string,
+    baseMint: string,
+    quoteMint: string,
+    baseDecimals: number,
+    quoteDecimals: number,
+    onUpdate?: (update: PoolSnapshot) => void
+  ): Promise<void> {
+    if (this.monitors.has(poolId)) {
+      this.logger.log(`Pool ${poolId} is already being monitored`);
+      return;
+    }
 
-      // Check if pool is already being monitored
-      if (this.pools.has(poolInfo.poolId)) {
-        this.logger.log(`Pool ${poolInfo.poolId} is already being monitored`);
-        return;
-      }
+    // Verify pool is ready in database
+    const pool = await this.db.getPendingPool('ready');
+    if (!pool || pool.pool_id !== poolId) {
+      throw new Error(`Pool ${poolId} is not ready for monitoring`);
+    }
 
-      this.logger.log(`Adding pool ${poolInfo.poolId} to real-time monitoring`);
-      this.logger.log(`Pair: ${baseToken.symbol}/${quoteToken.symbol}`);
-
-      // Subscribe to logs for this specific pool, but only process relevant ones
-      this.connection.onLogs(
-        new PublicKey(poolInfo.poolId),
-        (logs) => {
-          // Skip if logs don't contain our program
-          if (!logs.logs.some(log => log.includes('RaydiumSwap'))) {
-            return;
-          }
-
-          // Check for program errors
-          if (logs.err) {
-            // Only log specific errors we care about
-            const error = logs.err as any;
-            if (error.InstructionError) {
-              const [instructionIndex, errorCode] = error.InstructionError;
-              
-              // Skip common Custom:30 errors (these are normal during pool operations)
-              if (errorCode.Custom === 30) {
-                return;
-              }
-
-              // Log other program errors that might be important
-              if (errorCode.Custom) {
-                this.logger.debug(
-                  `Program instruction ${instructionIndex} error for pool ${poolInfo.poolId}: Custom(${errorCode.Custom})`
-                );
-                return;
-              }
-
-              // Log other types of errors
-              this.logger.warn(
-                `Program error in logs for pool ${poolInfo.poolId}: ${JSON.stringify(error, null, 2)}`
-              );
-            }
-            return;
-          }
-
-          // Process successful pool operations
-          const relevantLogs = logs.logs.filter(log => 
-            // Look for specific pool operations we care about
-            log.includes('Swap') || 
-            log.includes('AddLiquidity') || 
-            log.includes('RemoveLiquidity') ||
-            log.includes('Initialize')
-          );
-
-          if (relevantLogs.length > 0) {
-            this.logger.debug(`Pool ${poolInfo.poolId} operation: ${relevantLogs.join(', ')}`);
-            // Trigger a state update through the monitor's callback
-            const pool = this.pools.get(poolInfo.poolId);
-            if (pool?.monitor) {
-              // The monitor will handle the update through its scheduled updates
-              this.logger.debug(`Triggered state update for pool ${poolInfo.poolId}`);
-            }
-          }
-        },
-        'confirmed'
-      );
-
-      const monitor = new PoolMonitor(
-        this.connection,
-        poolInfo.poolId,
-        poolInfo.baseMint,
-        poolInfo.quoteMint,
-        this,
-        1000 // 1 second update interval
-      );
-
-      // Set the update callback
+    const monitor = new PoolMonitor(poolId);
+    if (onUpdate) {
       monitor.setOnUpdate(onUpdate);
+      this.subscribers.set(poolId, new Set([onUpdate]));
+    }
 
-      // Store pool info
-      this.pools.set(poolInfo.poolId, {
-        poolInfo,
-        baseToken,
-        quoteToken,
-        onUpdate,
-        lastUpdate: Date.now(),
-        monitor
-      });
+    this.monitors.set(poolId, monitor);
+    await monitor.start();
+  }
 
-      await monitor.start();
-      this.logger.log(`✅ Pool ${poolInfo.poolId} added to real-time monitoring`);
-    } catch (error) {
-      this.logger.error(`Failed to start monitoring ${poolInfo.poolId}: ${error.message}`);
-      // Clean up if monitor was created but failed to start
-      if (this.pools.has(poolInfo.poolId)) {
-        this.pools.delete(poolInfo.poolId);
+  public async removePool(poolId: string): Promise<void> {
+    const monitor = this.monitors.get(poolId);
+    if (monitor) {
+      await monitor.stop();
+      this.monitors.delete(poolId);
+      this.subscribers.delete(poolId);
+    }
+  }
+
+  private notifySubscribers(poolId: string, update: PoolSnapshot): void {
+    const poolSubscribers = this.subscribers.get(poolId);
+    if (poolSubscribers) {
+      for (const subscriber of poolSubscribers) {
+        try {
+          subscriber(update);
+        } catch (err) {
+          this.logger.error(`Error notifying subscriber for pool ${poolId}:`, err);
+        }
       }
     }
   }
 
-  private handlePoolUpdate(
-    poolId: string,
-    snapshot: PoolSnapshot,
-    pressure: MarketPressure
-  ): void {
-    // Handle pool updates here
-    // This could include broadcasting updates, storing data, etc.
-    this.logger.log(`Pool ${poolId} update received:`, {
-      price: snapshot.price,
-      priceChange: snapshot.priceChange,
-      tvl: snapshot.tvl,
-      pressure: pressure.value
-    });
+  public getPoolHistory(poolId: string, startTime?: number, endTime?: number): Promise<PoolSnapshot[]> {
+    return this.db.getPoolSnapshots(poolId, startTime, endTime);
+  }
+
+  public getPoolStats(poolId: string): Promise<PoolStats> {
+    return this.db.getPoolStats(poolId);
+  }
+
+  public subscribe(poolId: string, callback: (update: PoolSnapshot) => void): void {
+    if (!this.subscribers.has(poolId)) {
+      this.subscribers.set(poolId, new Set());
+    }
+    this.subscribers.get(poolId)?.add(callback);
+  }
+
+  public unsubscribe(poolId: string, callback: (update: PoolSnapshot) => void): void {
+    this.subscribers.get(poolId)?.delete(callback);
   }
 
   async getInitialQuote(poolId: string, baseMint: string, quoteMint: string): Promise<{
@@ -380,16 +355,5 @@ export class PoolMonitorManager {
       this.logger.debug(`Error getting pool info for ${poolId}:`, error);
       return null;
     }
-  }
-
-  removePool(poolId: string) {
-    if (this.pools.has(poolId)) {
-      this.pools.delete(poolId);
-      this.logger.log(`Removed pool ${poolId} from monitoring`);
-    }
-  }
-
-  getActivePools() {
-    return Array.from(this.pools.keys());
   }
 } 

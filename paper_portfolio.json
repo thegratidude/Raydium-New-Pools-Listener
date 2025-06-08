@@ -1,0 +1,86 @@
+{
+  "balance": {
+    "SOL": "9.980",
+    "5EXqgbydVrpmbLuGVirPZufuap72z97WR1SPGZuZSEsv": "5000000.000000000",
+    "wHnxbm8UEAgsx4yQoa5whdJTvesJwYmASXFxaZ6eqvX": "5000000.000000000",
+    "FnvzzJLytBzpTZ9rKZCpabQU4JQLNF8yd7QcNVnRprRn": "5000000.000000000",
+    "74UaiFJqDFyGr1sjV2TBpj13Sqjfv9SALCZqFkLxw9Zf": "5000000.000000000"
+  },
+  "positions": {
+    "G9mKzwaaAvY5UntGazoQddQ5hNXY41a6hHg1e6Eg4HR5": {
+      "entry_price": 1e-09,
+      "entry_amount": 5000000.0,
+      "entry_timestamp": 1749308868886,
+      "status": "open"
+    },
+    "CAgMtGoXRS88ykVAqvYY2EArZzYqenPJHqqCFKmyZEAS": {
+      "entry_price": 1e-09,
+      "entry_amount": 5000000.0,
+      "entry_timestamp": 1749309058612,
+      "status": "open"
+    },
+    "FZF2otZK68uRPBh9tKY9UgkujMBoAEvzMTmkuSBzRYBB": {
+      "entry_price": 1e-09,
+      "entry_amount": 5000000.0,
+      "entry_timestamp": 1749309373314,
+      "status": "open"
+    },
+    "29DDd55HG4VhhrYNSjNX46jtVo6F1JDUzUYiLppZTVEj": {
+      "entry_price": 1e-09,
+      "entry_amount": 5000000.0,
+      "entry_timestamp": 1749309435533,
+      "status": "open"
+    }
+  },
+  "trades": [
+    {
+      "pool_id": "G9mKzwaaAvY5UntGazoQddQ5hNXY41a6hHg1e6Eg4HR5",
+      "type": "buy",
+      "timestamp": 1749308868886,
+      "price": 1e-09,
+      "base_amount": 5000000.0,
+      "quote_amount": 0.005,
+      "base_mint": "5EXqgbydVrpmbLuGVirPZufuap72z97WR1SPGZuZSEsv",
+      "quote_mint": "So11111111111111111111111111111111111111112",
+      "tx_signature": "paper_buy_G9mKzwaaAvY5UntGazoQddQ5hNXY41a6hHg1e6Eg4HR5_1749308868886",
+      "status": "confirmed"
+    },
+    {
+      "pool_id": "CAgMtGoXRS88ykVAqvYY2EArZzYqenPJHqqCFKmyZEAS",
+      "type": "buy",
+      "timestamp": 1749309058612,
+      "price": 1e-09,
+      "base_amount": 5000000.0,
+      "quote_amount": 0.005,
+      "base_mint": "wHnxbm8UEAgsx4yQoa5whdJTvesJwYmASXFxaZ6eqvX",
+      "quote_mint": "So11111111111111111111111111111111111111112",
+      "tx_signature": "paper_buy_CAgMtGoXRS88ykVAqvYY2EArZzYqenPJHqqCFKmyZEAS_1749309058612",
+      "status": "confirmed"
+    },
+    {
+      "pool_id": "FZF2otZK68uRPBh9tKY9UgkujMBoAEvzMTmkuSBzRYBB",
+      "type": "buy",
+      "timestamp": 1749309373314,
+      "price": 1e-09,
+      "base_amount": 5000000.0,
+      "quote_amount": 0.005,
+      "base_mint": "FnvzzJLytBzpTZ9rKZCpabQU4JQLNF8yd7QcNVnRprRn",
+      "quote_mint": "So11111111111111111111111111111111111111112",
+      "tx_signature": "paper_buy_FZF2otZK68uRPBh9tKY9UgkujMBoAEvzMTmkuSBzRYBB_1749309373314",
+      "status": "confirmed"
+    },
+    {
+      "pool_id": "29DDd55HG4VhhrYNSjNX46jtVo6F1JDUzUYiLppZTVEj",
+      "type": "buy",
+      "timestamp": 1749309435533,
+      "price": 1e-09,
+      "base_amount": 5000000.0,
+      "quote_amount": 0.005,
+      "base_mint": "74UaiFJqDFyGr1sjV2TBpj13Sqjfv9SALCZqFkLxw9Zf",
+      "quote_mint": "So11111111111111111111111111111111111111112",
+      "tx_signature": "paper_buy_29DDd55HG4VhhrYNSjNX46jtVo6F1JDUzUYiLppZTVEj_1749309435533",
+      "status": "confirmed"
+    }
+  ],
+  "last_update": "2025-06-07T08:17:15.533075"
+}

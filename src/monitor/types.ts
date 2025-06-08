@@ -1,9 +1,11 @@
 import { PublicKey } from '@solana/web3.js';
+import { Logger } from '@nestjs/common';
 
 export enum TrendDirection {
-  Up = 'up',
-  Down = 'down',
-  Sideways = 'sideways'
+  UP = 'up',
+  DOWN = 'down',
+  NEUTRAL = 'neutral',
+  SIDEWAYS = 'sideways'
 }
 
 // Define pool state type
@@ -18,18 +20,29 @@ export interface RaydiumPoolState {
 
 // PoolSnapshot: represents a single point-in-time state of a pool
 export interface PoolSnapshot {
-  poolId: string;
+  pool_id: string;
   timestamp: number;
-  slot: number;
-  baseReserve: number;
-  quoteReserve: number;
+  base_reserve: number;
+  quote_reserve: number;
+  base_reserve_raw: string;
+  quote_reserve_raw: string;
   price: number;
-  priceChange: number;
+  price_change: number;
   tvl: number;
-  marketCap: number;
-  volumeChange: number;
-  volume24h: number; // 24h volume in USD
+  volume_24h: number;
+  volume_change: number;
+  buy_pressure: number;
+  sell_pressure: number;
+  market_pressure: number;
+  pressure_direction: TrendDirection;
+  pressure_strength: number;
+  pressure_severity: number;
+  trade_count: number;
+  trade_volume: number;
+  liquidity_change: number;
+  price_impact: number;
   suspicious: boolean;
+  risk_score: number;
   poolState?: RaydiumPoolState;
   // Additional properties for monitoring
   pressure?: MarketPressure;
@@ -86,6 +99,8 @@ export const MINT_TO_TOKEN: Record<string, TokenInfo> = {
 // Update callback type
 export type PoolUpdateCallback = (snapshot: PoolSnapshot) => void;
 
+const logger = new Logger('PoolUpdate');
+
 // Default update callback
 export function conciseOnUpdate(
   snapshot: PoolSnapshot,
@@ -99,10 +114,10 @@ export function conciseOnUpdate(
   poolId: string
 ) {
   const priceChange = previousSnapshot ? ((snapshot.price - previousSnapshot.price) / previousSnapshot.price) * 100 : 0;
-  const volumeChange = snapshot.volumeChange;
+  const volumeChange = snapshot.volume_change;
   const tvl = snapshot.tvl;
   
-  console.log(
+  logger.log(
     `📊 ${baseToken.symbol}/${quoteToken.symbol} | ` +
     `Price: $${snapshot.price.toFixed(8)} (${priceChange.toFixed(2)}%) | ` +
     `Vol: $${volumeChange.toLocaleString()} | ` +

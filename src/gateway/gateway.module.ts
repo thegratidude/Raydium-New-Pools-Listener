@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
-import { SocketService, EXPRESS_APP } from './socket.service';
-import { Express } from 'express';
+import { SocketService, EXPRESS_APP } from './socket.service.js';
+import express from 'express';
 
 @Module({
   providers: [
@@ -8,7 +8,6 @@ import { Express } from 'express';
     {
       provide: EXPRESS_APP,
       useFactory: () => {
-        const express = require('express');
         return express();
       },
     },

@@ -1,8 +1,8 @@
 import { Connection } from '@solana/web3.js';
-import { PendingPoolManager } from './pending-pool-manager';
-import { PoolMonitorService } from './pool-monitor.service';
+import { PendingPoolManager } from './pending-pool-manager.js';
+import { PoolMonitorService } from './pool-monitor.service.js';
 import { NestFactory } from '@nestjs/core';
-import { AppModule } from '../app.module';
+import { AppModule } from '../app.module.js';
 
 async function runTest() {
   const HTTP_URL = process.env.HTTP_URL!;
@@ -14,17 +14,25 @@ async function runTest() {
   const poolMonitorService = app.get(PoolMonitorService);
 
   // Create manager with injected services
-  const manager = new PendingPoolManager(connection, poolMonitorService);
+  const manager = new PendingPoolManager(connection);
 
   // Test pool
   const testPool = {
     poolId: 'test_pool_123',
     tokenA: 'So11111111111111111111111111111111111111112', // SOL
-    tokenB: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'  // USDC
+    tokenB: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',  // USDC
+    baseDecimals: 9,  // SOL decimals
+    quoteDecimals: 6  // USDC decimals
   };
 
   // Add test pool
-  manager.addPool(testPool.poolId, testPool.tokenA, testPool.tokenB);
+  manager.addPool(
+    testPool.poolId,
+    testPool.tokenA,
+    testPool.tokenB,
+    testPool.baseDecimals,
+    testPool.quoteDecimals
+  );
 
   // Keep the process running
   console.log('Test pending pool manager running... Press Ctrl+C to stop');

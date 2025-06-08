@@ -16,27 +16,30 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
   private httpServer: any;
 
   constructor(@Inject(EXPRESS_APP) private readonly app: Express) {
-    this.logger.log('SocketService constructed');
+    this.logger.debug('Starting SocketService initialization...');
   }
 
   async onModuleInit() {
     try {
-      this.logger.log('Starting SocketService initialization...');
+      this.logger.debug('Starting SocketService initialization...');
       
       // Kill any process using port 5001 (macOS/Linux only)
       try {
-        execSync(`lsof -ti:${this.PORT} | xargs kill -9 2>/dev/null || true`);
-        this.logger.log(`Cleared port ${this.PORT}`);
-      } catch (error) {
-        this.logger.warn(`Could not clear port ${this.PORT}: ${error.message}`);
+        const pid = execSync("lsof -ti:5001").toString().trim();
+        if (pid) {
+          this.logger.debug(`Cleared port 5001 (PID: ${pid})`);
+          execSync(`kill -9 ${pid}`);
+        }
+      } catch (e) {
+        // No process found or error occurred, ignore
       }
 
       // Create HTTP server
-      this.logger.log('Creating HTTP server...');
+      this.logger.debug('Creating HTTP server...');
       this.httpServer = createServer(this.app);
       
       // Create Socket.IO server with enhanced configuration
-      this.logger.log('Creating Socket.IO server...');
+      this.logger.debug('Creating Socket.IO server...');
       this.server = new Server(this.httpServer, {
         cors: {
           origin: '*',
@@ -55,7 +58,7 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
       });
 
       // Set up Socket.IO event handlers with enhanced logging
-      this.logger.log('Setting up Socket.IO event handlers...');
+      this.logger.debug('Setting up Socket.IO event handlers...');
       this.server.on('connection', (socket) => {
         this.logger.log(`✅ Client connected - ID: ${socket.id}`);
         this.logger.log(`Client transport: ${socket.conn.transport.name}`);
@@ -71,11 +74,11 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
       });
 
       // Start the server
-      this.logger.log(`Starting server on port ${this.PORT}...`);
+      this.logger.debug('Starting server on port 5001...');
       await new Promise<void>((resolve, reject) => {
         this.httpServer.listen(this.PORT, () => {
           this.logger.log(`Socket.IO server running on port ${this.PORT}`);
-          this.logger.log(`Server address: http://localhost:${this.PORT}`);
+          this.logger.debug(`Server address: http://localhost:${this.PORT}`);
           this.isInitialized = true;
           this.startHealthChecks();
           resolve();
@@ -99,11 +102,10 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
         });
       });
 
-      this.logger.log('SocketService initialization completed successfully');
+      this.logger.debug('SocketService initialization completed');
     } catch (error) {
-      this.logger.error(`SocketService initialization failed: ${error.message}`);
-      this.logger.error(error.stack);
-      throw error; // Re-throw to let NestJS handle the error
+      this.logger.error('Failed to initialize SocketService:', error);
+      throw error;
     }
   }
 

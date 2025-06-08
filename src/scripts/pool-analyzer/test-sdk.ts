@@ -1,7 +1,7 @@
 import { Connection } from '@solana/web3.js';
 import { Api, PoolFetchType } from '@raydium-io/raydium-sdk-v2';
 import * as dotenv from 'dotenv';
-import { getRaydiumRoundTripQuote } from '../../raydium/quoteRaydium';
+import { getRaydiumRoundTripQuote } from '../../raydium/quoteRaydium.js';
 
 dotenv.config();
 

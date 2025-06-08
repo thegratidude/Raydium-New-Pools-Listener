@@ -1,5 +1,5 @@
 import { Connection, Keypair, PublicKey } from '@solana/web3.js';
-import { SwapEngine } from '../../raydium/swapEngine';
+import { SwapEngine } from '../../raydium/swapEngine.js';
 import * as dotenv from 'dotenv';
 dotenv.config();
 

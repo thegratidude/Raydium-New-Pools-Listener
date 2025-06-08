@@ -1,7 +1,7 @@
 import { Controller, Get, Post, Body, Patch, Param, Delete } from '@nestjs/common';
-import { RaydiumService } from './raydium.service';
-import { CreateRaydiumDto } from './dto/create-raydium.dto';
-import { UpdateRaydiumDto } from './dto/update-raydium.dto';
+import { RaydiumService } from './raydium.service.js';
+import { CreateRaydiumDto } from './dto/create-raydium.dto.js';
+import { UpdateRaydiumDto } from './dto/update-raydium.dto.js';
 
 @Controller('raydium')
 export class RaydiumController {

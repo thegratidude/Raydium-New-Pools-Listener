@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
-import { CreateRaydiumDto } from './dto/create-raydium.dto';
-import { UpdateRaydiumDto } from './dto/update-raydium.dto';
+import { CreateRaydiumDto } from './dto/create-raydium.dto.js';
+import { UpdateRaydiumDto } from './dto/update-raydium.dto.js';
 
 @Injectable()
 export class RaydiumService {

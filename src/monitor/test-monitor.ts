@@ -1,9 +1,10 @@
 import { config } from 'dotenv';
 config();
-import { PoolMonitorManager } from './pool-monitor-manager';
+import { PoolMonitorManager } from './pool-monitor-manager.js';
 import fetch from 'node-fetch';
 import { Connection } from '@solana/web3.js';
-import { conciseOnUpdate, TrendDirection } from './types';
+import { conciseOnUpdate, TrendDirection } from './types.js';
+import { Logger } from '@nestjs/common';
 
 const HTTP_URL = process.env.HTTP_URL!;
 const WSS_URL = process.env.WSS_URL!;
@@ -25,6 +26,8 @@ const manager = new PoolMonitorManager(connection);
 
 let solPrice = 0;
 
+const logger = new Logger('TestMonitor');
+
 async function updateSolPrice() {
   try {
     const res = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
@@ -43,33 +46,40 @@ function formatUSD(n: number) {
 }
 
 // Start monitoring
-manager.addPool(poolDiscoveryResult, tokenA, tokenB, (snapshot) => {
-  // Use conciseOnUpdate for logging
-  conciseOnUpdate(
-    snapshot,
-    snapshot.pressure || { 
-      direction: TrendDirection.Sideways, 
-      strength: 0, // neutral strength as a number
-      value: 0, 
-      buyPressure: 0, 
-      sellPressure: 0, 
-      rugRisk: 0, 
-      trend: TrendDirection.Sideways,
-      severity: 'low'
-    },
-    tokenA,
-    tokenB,
-    snapshot.originPrice || null,
-    snapshot.originBaseReserve || null,
-    snapshot.originQuoteReserve || null,
-    snapshot.previousSnapshot || null,
-    snapshot.poolId
-  );
-});
+manager.addPool(
+  poolDiscoveryResult.poolId,
+  poolDiscoveryResult.baseMint,
+  poolDiscoveryResult.quoteMint,
+  tokenA.decimals,
+  tokenB.decimals,
+  (snapshot) => {
+    // Use conciseOnUpdate for logging
+    conciseOnUpdate(
+      snapshot,
+      snapshot.pressure || { 
+        direction: TrendDirection.SIDEWAYS, 
+        strength: 0, // neutral strength as a number
+        value: 0, 
+        buyPressure: 0, 
+        sellPressure: 0, 
+        rugRisk: 0, 
+        trend: TrendDirection.SIDEWAYS,
+        severity: 'low'
+      },
+      tokenA,
+      tokenB,
+      snapshot.originPrice || null,
+      snapshot.originBaseReserve || null,
+      snapshot.originQuoteReserve || null,
+      snapshot.previousSnapshot || null,
+      snapshot.pool_id
+    );
+  }
+);
 
 // Keep the process running
-console.log('Test monitor running... Press Ctrl+C to stop');
+logger.log('Test monitor running... Press Ctrl+C to stop');
 process.on('SIGINT', () => {
-  console.log('Stopping test monitor...');
+  logger.log('Stopping test monitor...');
   process.exit(0);
 }); 

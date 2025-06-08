@@ -10,6 +10,7 @@ import logging.config
 import os
 import json
 import sys
+import signal
 from datetime import datetime
 from typing import Dict, Any, Optional, List, Set, Deque
 from collections import deque
@@ -22,6 +23,8 @@ from db_manager import DatabaseManager
 from swap.swap_buy_ammv4 import execute_buy
 from swap.swap_sell_ammv4 import execute_sell
 from paper_trading import PaperTradingManager
+from contextlib import asynccontextmanager
+import time
 
 # Load environment variables
 load_dotenv()
@@ -32,15 +35,19 @@ logging.config.dictConfig({
     'disable_existing_loggers': False,
     'formatters': {
         'standard': {
-            'format': '%(asctime)s [%(levelname)s] %(message)s',
+            'format': '\033[36m%(asctime)s\033[0m [%(levelname)s] %(message)s',
             'datefmt': '%H:%M:%S'
         },
         'pool_event': {
-            'format': '\n%(message)s\n',
+            'format': '\033[33m%(message)s\033[0m',
             'datefmt': '%H:%M:%S'
         },
         'trade_event': {
-            'format': '\n%(message)s\n',
+            'format': '\033[32m%(message)s\033[0m',
+            'datefmt': '%H:%M:%S'
+        },
+        'error': {
+            'format': '\033[31m%(asctime)s [%(levelname)s] %(message)s\033[0m',
             'datefmt': '%H:%M:%S'
         }
     },
@@ -48,6 +55,11 @@ logging.config.dictConfig({
         'default': {
             'level': 'INFO',
             'formatter': 'standard',
+            'class': 'logging.StreamHandler',
+        },
+        'error': {
+            'level': 'ERROR',
+            'formatter': 'error',
             'class': 'logging.StreamHandler',
         },
         'file': {
@@ -61,7 +73,7 @@ logging.config.dictConfig({
     },
     'loggers': {
         '': {  # Root logger
-            'handlers': ['default', 'file'],
+            'handlers': ['default', 'error', 'file'],
             'level': 'INFO',
             'propagate': True
         }
@@ -78,25 +90,21 @@ os.makedirs('logs', exist_ok=True)
 
 def log_pool_event(message: str, level: str = 'info'):
     """Log a pool-related event with visual formatting."""
-    separator = '=' * 80
-    formatted_message = f"\n{separator}\n{message}\n{separator}\n"
     if level == 'info':
-        pool_logger.info(formatted_message)
+        pool_logger.info(message)
     elif level == 'warning':
-        pool_logger.warning(formatted_message)
+        pool_logger.warning(message)
     elif level == 'error':
-        pool_logger.error(formatted_message)
+        pool_logger.error(message)
 
 def log_trade_event(message: str, level: str = 'info'):
     """Log a trade-related event with visual formatting."""
-    separator = '-' * 80
-    formatted_message = f"\n{separator}\n{message}\n{separator}\n"
     if level == 'info':
-        trade_logger.info(formatted_message)
+        trade_logger.info(message)
     elif level == 'warning':
-        trade_logger.warning(formatted_message)
+        trade_logger.warning(message)
     elif level == 'error':
-        trade_logger.error(formatted_message)
+        trade_logger.error(message)
 
 @dataclass
 class TradeConfig:
@@ -147,7 +155,9 @@ class RaydiumWebSocketClient:
         self._stop_event = asyncio.Event()
         self._max_concurrent_monitors = 50  # Maximum number of pools to monitor simultaneously
         self._monitor_semaphore = asyncio.Semaphore(self._max_concurrent_monitors)  # Limit concurrent monitors
-        self.sio = socketio.AsyncClient()
+        
+        # Initialize Socket.IO client with silent logging
+        self.sio = socketio.AsyncClient(logger=False, engineio_logger=False)
         self._register_event_handlers()
         
         # Initialize state tracking
@@ -175,28 +185,30 @@ class RaydiumWebSocketClient:
         self._initialize_socket()
         self._initialize_database()
         self._initialize_trading()
-        self._initialize_rpc_pool()
         
         # Start trade processor and latency monitor
         self._trade_processor_task = asyncio.create_task(self._process_trade_queue())
         self._latency_monitor_task = asyncio.create_task(self._monitor_latency())
+        
+        # Initialize RPC pool asynchronously
+        asyncio.create_task(self._initialize_rpc_pool())
     
-    def _initialize_socket(self):
+    async def _initialize_socket(self):
         """Initialize Socket.IO client with proper error handling."""
         try:
-            self.sio = socketio.AsyncClient(
-                logger=True,
-                engineio_logger=True,
-                reconnection=True,
-                reconnection_attempts=self.config.max_reconnection_attempts,
-                reconnection_delay=self.config.reconnection_delay,
-                reconnection_delay_max=self.config.reconnection_delay_max,
-                randomization_factor=0.5
-            )
-            self._register_event_handlers()
-        except Exception as e:
-            logger.error(f"Failed to initialize Socket.IO client: {str(e)}")
-            raise
+            # Configure Socket.IO client to be silent
+            self.sio.logger.setLevel(logging.ERROR)  # Only show critical errors
+            self.sio.eio.logger.setLevel(logging.ERROR)  # Only show critical errors
+            
+            # Register event handlers
+            self.sio.on('connect', self._on_connect)
+            self.sio.on('disconnect', self._on_disconnect)
+            self.sio.on('new_pool', self._on_new_pool)
+            self.sio.on('pool_update', self._on_pool_update)
+            self.sio.on('trade_event', self._on_trade_event)
+            self.sio.on('error', lambda e: None)  # Silently ignore errors
+        except Exception:
+            pass  # Silently ignore initialization errors
     
     def _initialize_database(self):
         """Initialize database manager."""
@@ -210,15 +222,20 @@ class RaydiumWebSocketClient:
         """Initialize trading components based on mode."""
         if self.config.live_trading:
             logger.info("Running in LIVE TRADING mode")
-            if not os.getenv('PAYER_PRIVATE_KEY'):
-                logger.warning("PAYER_PRIVATE_KEY not set. Live trading will not work.")
+            secret_key = os.getenv('SOLANA_SECRET')
+            if secret_key:
+                # Display last 4 chars of the secret key
+                last_four = secret_key[-4:] if len(secret_key) >= 4 else '****'
+                logger.info(f"\033[32m✓ Loaded payer keypair (ending in ...{last_four})\033[0m")
+            else:
+                logger.warning("\033[33m! PAYER_PRIVATE_KEY not set. Live trading will not work.\033[0m")
             self.paper_trader = None
         else:
             logger.info("Running in PAPER TRADING mode")
             try:
                 self.paper_trader = PaperTradingManager()
             except Exception as e:
-                logger.error(f"Failed to initialize paper trading: {str(e)}")
+                logger.error(f"\033[31m✗ Failed to initialize paper trading: {str(e)}\033[0m")
                 raise
     
     def _register_event_handlers(self):
@@ -561,55 +578,93 @@ Last Update: {datetime.now().strftime('%H:%M:%S')}
     
     async def start(self):
         """Start the WebSocket client and maintain connection."""
-        try:
-            logger.info(f"Starting Raydium WebSocket client... Connecting to {self.config.server_url}")
-            
-            # Attempt connection with timeout
+        consecutive_failures = 0
+        last_log_time = 0
+        
+        while not self._stop_event.is_set():
             try:
-                await asyncio.wait_for(
-                    self.sio.connect(
-                        self.config.server_url,
-                        wait_timeout=10
-                    ),
-                    timeout=15
-                )
-                logger.info("Connection established. Listening for events (including real-time price updates)...")
-            except asyncio.TimeoutError:
-                logger.error("Connection attempt timed out")
-                raise
-            except Exception as e:
-                logger.error(f"Connection failed: {str(e)}")
-                raise
-            
-            # Keep the client running
-            while True:
-                try:
-                    await asyncio.sleep(1)
-                except asyncio.CancelledError:
-                    logger.info("Client task cancelled")
-                    break
-                except Exception as e:
-                    logger.error(f"Error in main loop: {str(e)}")
-                    await asyncio.sleep(5)  # Wait before retrying
+                if self.sio.connected:
+                    # If already connected, just wait and monitor the connection
+                    while not self._stop_event.is_set():
+                        try:
+                            if not self.sio.connected:
+                                logger.info("\033[33m! Disconnected from server\033[0m")
+                                consecutive_failures = 0
+                                last_log_time = 0
+                                break
+                            await asyncio.sleep(1)
+                        except asyncio.CancelledError:
+                            if not self._stop_event.is_set():
+                                logger.info("\033[33m! Client task cancelled\033[0m")
+                            return
+                        except Exception:
+                            await asyncio.sleep(1)
+                    continue
+
+                current_time = time.time()
+                # Only log initial connection attempt and every 5 seconds of failures
+                if consecutive_failures == 0 or current_time - last_log_time >= 5:
+                    logger.info("\033[33m⟳ Connecting to server...\033[0m")
+                    last_log_time = current_time
                 
-        except KeyboardInterrupt:
-            logger.info("Shutdown requested by user")
-        except Exception as e:
-            logger.error(f"Fatal error: {str(e)}")
-            raise
-        finally:
-            await self.shutdown()
-    
+                try:
+                    await asyncio.wait_for(
+                        self.sio.connect(
+                            self.config.server_url,
+                            wait_timeout=1
+                        ),
+                        timeout=2
+                    )
+                    if consecutive_failures > 0:
+                        logger.info("\033[32m✓ Connected to server\033[0m")
+                    consecutive_failures = 0
+                except asyncio.TimeoutError:
+                    if self._stop_event.is_set():
+                        break
+                    consecutive_failures += 1
+                    await asyncio.sleep(1)
+                    continue
+                except Exception as e:
+                    if self._stop_event.is_set():
+                        break
+                    if "Already connected" in str(e):
+                        consecutive_failures = 0
+                        continue
+                    consecutive_failures += 1
+                    await asyncio.sleep(1)
+                    continue
+                
+            except KeyboardInterrupt:
+                logger.info("\033[33m! Shutdown requested by user\033[0m")
+                break
+            except Exception:
+                if self._stop_event.is_set():
+                    break
+                consecutive_failures += 1
+                await asyncio.sleep(1)
+                continue
+
     async def shutdown(self):
         """Clean shutdown of the WebSocket client."""
-        logger.info("Shutting down WebSocket client...")
+        logger.info("\033[33m! Shutting down WebSocket client...\033[0m")
         
         try:
+            # Set stop event to prevent new operations
+            self._stop_event.set()
+            
             # Cancel trade processor
             if self._trade_processor_task:
                 self._trade_processor_task.cancel()
                 try:
                     await self._trade_processor_task
+                except asyncio.CancelledError:
+                    pass
+            
+            # Cancel latency monitor
+            if self._latency_monitor_task:
+                self._latency_monitor_task.cancel()
+                try:
+                    await self._latency_monitor_task
                 except asyncio.CancelledError:
                     pass
             
@@ -623,18 +678,85 @@ Last Update: {datetime.now().strftime('%H:%M:%S')}
                         pass
             self._active_monitors.clear()
             
-            # Disconnect from server
-            if self.sio.connected:
-                await self.sio.disconnect()
+            # Properly disconnect and cleanup Socket.IO client
+            if self.sio:
+                try:
+                    # First disconnect if connected
+                    if self.sio.connected:
+                        await self.sio.disconnect()
+                    
+                    # Then close the engine
+                    if hasattr(self.sio, 'eio') and self.sio.eio:
+                        await self.sio.eio.close()
+                    
+                    # Finally, close the client session
+                    if hasattr(self.sio, 'http') and self.sio.http:
+                        await self.sio.http.close()
+                except Exception as e:
+                    logger.error(f"\033[31m✗ Error during Socket.IO cleanup: {str(e)}\033[0m")
             
             # Close database connection
             if self.db_manager:
                 self.db_manager.close()
             
-            logger.info("Shutdown complete")
+            logger.info("\033[32m✓ Shutdown complete\033[0m")
         except Exception as e:
-            logger.error(f"Error during shutdown: {str(e)}")
+            logger.error(f"\033[31m✗ Error during shutdown: {str(e)}\033[0m")
             raise
+
+    async def _reconnect_loop(self):
+        """Attempt to reconnect to the server every second."""
+        consecutive_failures = 0
+        last_log_time = 0
+        
+        while not self._stop_event.is_set():
+            try:
+                if self.sio.connected:
+                    if consecutive_failures > 0:
+                        logger.info("\033[32m✓ Reconnected to server\033[0m")
+                    return
+
+                current_time = time.time()
+                # Only log every 5 seconds of failed attempts
+                if current_time - last_log_time >= 5:
+                    logger.info("\033[33m⟳ Reconnecting...\033[0m")
+                    last_log_time = current_time
+                    consecutive_failures += 1
+
+                try:
+                    await asyncio.wait_for(
+                        self.sio.connect(
+                            self.config.server_url,
+                            wait_timeout=1
+                        ),
+                        timeout=2
+                    )
+                    if consecutive_failures > 0:
+                        logger.info("\033[32m✓ Reconnected to server\033[0m")
+                    return
+                except (asyncio.TimeoutError, Exception):
+                    if self._stop_event.is_set():
+                        return
+                    consecutive_failures += 1
+                    await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                if not self._stop_event.is_set():
+                    logger.info("\033[33m! Reconnection cancelled\033[0m")
+                return
+            except Exception:
+                if self._stop_event.is_set():
+                    return
+                consecutive_failures += 1
+                await asyncio.sleep(1)
+
+    async def _on_disconnect(self):
+        """Handle disconnection and attempt to reconnect."""
+        if self._stop_event.is_set():  # Don't attempt reconnection if we're shutting down
+            return
+            
+        logger.info("\033[33m! Disconnected from server\033[0m")
+        # Start reconnection loop
+        asyncio.create_task(self._reconnect_loop())
 
     async def _initialize_rpc_pool(self):
         """Initialize and pre-warm RPC connections."""
@@ -685,6 +807,9 @@ Last Update: {datetime.now().strftime('%H:%M:%S')}
             try:
                 await asyncio.sleep(60)  # Log stats every minute
                 
+                if not self.config.enable_timing_logs:
+                    continue
+                    
                 # Calculate timing statistics
                 stats = {}
                 for metric, values in self._timing_stats.items():
@@ -701,36 +826,33 @@ Last Update: {datetime.now().strftime('%H:%M:%S')}
                             'count': len(values)
                         }
                 
-                # Log detailed timing statistics
-                logger.info("\n⏱️ Timing Statistics (last minute):")
-                for metric, data in stats.items():
-                    logger.info(f"{metric}:")
-                    logger.info(f"  Count: {data['count']}")
-                    logger.info(f"  Average: {data['avg_ms']}ms")
-                    logger.info(f"  95th percentile: {data['p95_ms']}ms")
-                    logger.info(f"  99th percentile: {data['p99_ms']}ms")
-                    logger.info(f"  Min: {data['min_ms']}ms")
-                    logger.info(f"  Max: {data['max_ms']}ms")
+                # Log detailed timing statistics only if enabled
+                if self.config.enable_timing_logs and stats:
+                    logger.info("\n⏱️ Timing Statistics (last minute):")
+                    for metric, data in stats.items():
+                        logger.info(f"{metric}:")
+                        logger.info(f"  Count: {data['count']}")
+                        logger.info(f"  Average: {data['avg_ms']}ms")
+                        logger.info(f"  95th percentile: {data['p95_ms']}ms")
+                        logger.info(f"  99th percentile: {data['p99_ms']}ms")
+                        logger.info(f"  Min: {data['min_ms']}ms")
+                        logger.info(f"  Max: {data['max_ms']}ms")
                 
                 # Clear old stats
                 for values in self._timing_stats.values():
                     values.clear()
                     
             except Exception as e:
-                logger.error(f"Error in latency monitor: {str(e)}")
+                logger.error(f"\033[31m✗ Error in latency monitor: {str(e)}\033[0m")
                 await asyncio.sleep(5)
 
     async def _on_connect(self):
         """Handle successful connection."""
-        logger.info("Connected to server")
+        logger.info("\033[32m✓ Connected to server\033[0m")
 
     async def _on_connect_error(self, data):
         """Handle connection errors."""
-        logger.error(f"Connection error: {data}")
-
-    async def _on_disconnect(self):
-        """Handle disconnection."""
-        logger.info("Disconnected from server")
+        logger.error(f"\033[31m✗ Connection error: {data}\033[0m")
 
     async def _get_pool_lock(self, pool_id: str) -> asyncio.Lock:
         """Get or create a lock for a specific pool."""
@@ -1010,31 +1132,62 @@ Error: {str(e)}
             if pool_id in self._pending_pools:
                 del self._pending_pools[pool_id]
 
+@asynccontextmanager
+async def shutdown_handler(client: RaydiumWebSocketClient):
+    """Context manager to handle graceful shutdown."""
+    try:
+        yield
+    finally:
+        logger.info("\033[33m! Shutdown requested, cleaning up...\033[0m")
+        await client.shutdown()
+        logger.info("\033[32m✓ Cleanup complete. Goodbye!\033[0m")
+
 async def main():
-    """Main entry point."""
+    """Main entry point with proper signal handling."""
+    # Create shutdown event
+    shutdown_event = asyncio.Event()
+    
+    def signal_handler(signum, frame):
+        """Handle shutdown signals."""
+        logger.info("\n\033[33m! Received shutdown signal (Ctrl+C)\033[0m")
+        shutdown_event.set()
+    
+    # Register signal handlers
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     try:
         config = TradeConfig()
         client = RaydiumWebSocketClient(config)
         
-        try:
-            await client.start()
-        except KeyboardInterrupt:
-            logger.info("Shutdown requested by user")
-        except Exception as e:
-            logger.error(f"Fatal error: {str(e)}")
-            raise
-        finally:
-            await client.shutdown()
+        async with shutdown_handler(client):
+            # Start the client
+            client_task = asyncio.create_task(client.start())
+            
+            # Wait for either shutdown signal or client task completion
+            await asyncio.wait(
+                [client_task, asyncio.create_task(shutdown_event.wait())],
+                return_when=asyncio.FIRST_COMPLETED
+            )
+            
+            # If we got here due to shutdown signal, cancel the client task
+            if shutdown_event.is_set():
+                client_task.cancel()
+                try:
+                    await client_task
+                except asyncio.CancelledError:
+                    pass
             
     except Exception as e:
-        logger.error(f"Failed to start client: {str(e)}")
+        logger.error(f"\033[31m✗ Fatal error: {str(e)}\033[0m")
         sys.exit(1)
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Shutdown requested by user")
+        # This should not be reached due to signal handler, but just in case
+        logger.info("\n\033[33m! Shutdown requested by user\033[0m")
     except Exception as e:
-        logger.error(f"Fatal error: {str(e)}")
+        logger.error(f"\033[31m✗ Fatal error: {str(e)}\033[0m")
         sys.exit(1) 

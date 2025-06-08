@@ -7,7 +7,7 @@ import {
   PoolReserves,
   TradeActivity,
   PriceState
-} from './types/monitor.types';
+} from './types/monitor.types.js';
 import { Api } from '@raydium-io/raydium-sdk-v2';
 
 /**

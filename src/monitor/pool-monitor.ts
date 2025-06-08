@@ -1,463 +1,164 @@
-import { Connection, PublicKey, AccountInfo } from '@solana/web3.js';
-import { Api } from '@raydium-io/raydium-sdk-v2';
-import { PoolMonitorManager } from './pool-monitor-manager';
-import { PoolSnapshot, MarketPressure, TokenInfo, RaydiumPoolState, TrendDirection, PoolUpdateCallback } from './types';
-import { decodeRaydiumPoolState } from './raydium-layout';
+import { Connection, PublicKey } from '@solana/web3.js';
+import { PoolSnapshot as AppPoolSnapshot, TrendDirection } from './types.js';
+import { DatabaseManager, PoolSnapshot as DbPoolSnapshot } from './db-manager.js';
+import { getCurrentTimestamp } from './db-schema.js';
+import { Logger } from '@nestjs/common';
 
 export class PoolMonitor {
-  private api: Api;
-  private lastUpdate: number = 0;
-  private updateInterval: number;
-  private isRunning: boolean = false;
-  private onUpdateCallback: PoolUpdateCallback | null = null;
-  private tokenA: TokenInfo;
-  private tokenB: TokenInfo;
-  private onUpdate: (snapshot: PoolSnapshot, pressure: MarketPressure, originPrice: number | null, originBaseReserve: number | null, originQuoteReserve: number | null, prevSnapshot: PoolSnapshot | null) => void;
-  private readonly HISTORY_LENGTH: number = 50;
-  private subscriptionId: number | null = null;
-  private dbWriteTimer: NodeJS.Timeout | null = null;
-  private prevSnapshot: PoolSnapshot | null = null;
-  private poolHistory: PoolSnapshot[] = [];
-  private reconnectAttempts: number = 0;
-  private readonly MAX_RECONNECT_ATTEMPTS = 5;
-  private readonly RECONNECT_DELAY = 5000; // 5 seconds
+    private readonly logger = new Logger(PoolMonitor.name);
+    private updateCallback: ((snapshot: AppPoolSnapshot) => void) | null = null;
+    private intervalId: NodeJS.Timeout | null = null;
+    private lastSnapshot: AppPoolSnapshot | null = null;
+    private db: DatabaseManager;
 
-  constructor(
-    private readonly connection: Connection,
-    private readonly poolId: string,
-    private readonly baseMint: string,
-    private readonly quoteMint: string,
-    private readonly manager: PoolMonitorManager,
-    updateInterval: number = 1000 // 1 second default
-  ) {
-    this.tokenA = { symbol: '', decimals: 0, mint: baseMint };
-    this.tokenB = { symbol: '', decimals: 0, mint: quoteMint };
-    this.onUpdate = (snapshot: PoolSnapshot, pressure: MarketPressure, originPrice: number | null, originBaseReserve: number | null, originQuoteReserve: number | null, prevSnapshot: PoolSnapshot | null) => {};
-    this.updateInterval = updateInterval;
-    this.api = new Api({ cluster: 'mainnet', timeout: 30000 });
-  }
-
-  public setOnUpdate(callback: PoolUpdateCallback): void {
-    this.onUpdateCallback = callback;
-  }
-
-  public async start(): Promise<void> {
-    if (this.isRunning) {
-      console.log(`Monitor for ${this.poolId} is already running`);
-      return;
+    constructor(
+        private readonly poolId: string,
+        private readonly updateInterval: number = 1000
+    ) {
+        this.db = new DatabaseManager();
     }
 
-    try {
-      // Initialize market using Raydium SDK v2
-      const poolInfo = await this.api.fetchPoolById({ ids: this.poolId });
-      if (!Array.isArray(poolInfo) || poolInfo.length === 0 || !poolInfo[0]) {
-        throw new Error(`Market info not found for ${this.poolId}`);
-      }
-
-      // Update token info with actual symbols and decimals
-      if (poolInfo[0].mintA && poolInfo[0].mintB) {
-        this.tokenA = {
-          symbol: poolInfo[0].mintA.symbol || 'Unknown',
-          decimals: poolInfo[0].mintA.decimals || 9,
-          mint: this.baseMint
-        };
-        this.tokenB = {
-          symbol: poolInfo[0].mintB.symbol || 'Unknown',
-          decimals: poolInfo[0].mintB.decimals || 6,
-          mint: this.quoteMint
-        };
-      }
-
-      this.isRunning = true;
-      this.lastUpdate = Date.now();
-      this.scheduleNextUpdate();
-      console.log(`Started monitoring ${this.poolId}`);
-    } catch (error) {
-      console.error(`Failed to start monitoring ${this.poolId}:`, error);
-      this.manager.removePool(this.poolId);
+    async init() {
+        await this.db.init();
     }
-  }
 
-  public stop(): void {
-    this.isRunning = false;
-    console.log(`Stopped monitoring ${this.poolId}`);
-  }
+    public setOnUpdate(callback: (snapshot: AppPoolSnapshot) => void): void {
+        this.updateCallback = callback;
+    }
 
-  private scheduleNextUpdate(): void {
-    if (!this.isRunning) return;
-
-    setTimeout(async () => {
-      if (!this.isRunning) return;
-
-      try {
-        const snapshot = await this.fetchSnapshot();
-        if (this.onUpdateCallback) {
-          this.onUpdateCallback(snapshot);
+    public async start(): Promise<void> {
+        if (this.intervalId) {
+            this.logger.log(`Already monitoring pool ${this.poolId}`);
+            return;
         }
-      } catch (error) {
-        console.error(`Error updating ${this.poolId}:`, error);
-      }
 
-      this.lastUpdate = Date.now();
-      this.scheduleNextUpdate();
-    }, this.updateInterval);
-  }
+        this.logger.log(`Starting monitoring for pool ${this.poolId}`);
+        
+        // Initial snapshot
+        await this.updateState();
 
-  private async fetchSnapshot(): Promise<PoolSnapshot> {
-    const poolInfo = await this.api.fetchPoolById({ ids: this.poolId });
-    if (!Array.isArray(poolInfo) || poolInfo.length === 0 || !poolInfo[0]) {
-      throw new Error(`Market info not found for ${this.poolId}`);
+        // Set up interval for updates
+        this.intervalId = setInterval(async () => {
+            await this.updateState();
+        }, this.updateInterval);
     }
 
-    const pool = poolInfo[0];
-    const price = pool.price || 0;
-    const baseReserve = pool.mintAmountA || 0;
-    const quoteReserve = pool.mintAmountB || 0;
-    const tvl = pool.tvl || 0;
-    const volume24h = pool.day?.volume || 0;
-
-    // Calculate price change if we have a previous snapshot
-    const priceChange = this.prevSnapshot ? ((price - this.prevSnapshot.price) / this.prevSnapshot.price) * 100 : 0;
-
-    // Calculate market pressure based on recent trades
-    const buyPressure = priceChange > 0 ? Math.min(100, 50 + priceChange * 10) : Math.max(0, 50 - Math.abs(priceChange) * 10);
-    const sellPressure = priceChange < 0 ? Math.min(100, 50 + Math.abs(priceChange) * 10) : Math.max(0, 50 - priceChange * 10);
-    const rugRisk = Math.abs(priceChange) > 20 ? 60 : 10;
-
-    // Determine trend using TrendDirection enum
-    let trend: TrendDirection = TrendDirection.Sideways;
-    if (priceChange > 0.1) trend = TrendDirection.Up;
-    else if (priceChange < -0.1) trend = TrendDirection.Down;
-
-    // Create snapshot
-    const snapshot: PoolSnapshot = {
-      poolId: this.poolId,
-      timestamp: Date.now(),
-      slot: 0, // TODO: Get actual slot
-      baseReserve,
-      quoteReserve,
-      price,
-      priceChange,
-      tvl,
-      volume24h,
-      marketCap: 0, // TODO: Implement market cap calculation
-      volumeChange: 0, // TODO: Implement volume change calculation
-      suspicious: false, // TODO: Implement suspicious detection
-      poolState: undefined // TODO: Get pool state if needed
-    };
-
-    return snapshot;
-  }
-
-  private subscribeToAccountChanges(): void {
-    if (this.subscriptionId !== null) {
-      console.warn(`Already subscribed to pool ${this.poolId}`);
-      return;
+    public async stop(): Promise<void> {
+        if (this.intervalId) {
+            clearInterval(this.intervalId);
+            this.intervalId = null;
+            this.logger.log(`Stopped monitoring pool ${this.poolId}`);
+        }
     }
 
-    try {
-      console.log(`Subscribing to account changes for pool ${this.poolId}`);
-      
-      this.subscriptionId = this.connection.onAccountChange(
-        new PublicKey(this.poolId),
-        async (accountInfo, context) => {
-          try {
-            if (!accountInfo || !accountInfo.data) {
-              console.warn(`Received empty account data for pool ${this.poolId}`);
-              return;
+    private async updateState(): Promise<void> {
+        try {
+            // Get latest snapshot from database
+            const snapshots = await this.db.getPoolSnapshots(this.poolId, undefined, undefined, 1);
+            if (snapshots.length === 0) {
+                this.logger.warn(`No snapshots found for pool ${this.poolId}`);
+                return;
             }
 
-            // Decode pool state
-            const rawPoolState = decodeRaydiumPoolState(accountInfo.data);
-            if (!rawPoolState) {
-              console.warn(`Failed to decode pool state for ${this.poolId}`);
-              return;
-            }
-
-            // Convert PublicKey fields to strings
-            const poolState: RaydiumPoolState = {
-              baseMint: rawPoolState.baseMint.toString(),
-              quoteMint: rawPoolState.quoteMint.toString(),
-              baseVault: rawPoolState.baseVault.toString(),
-              quoteVault: rawPoolState.quoteVault.toString(),
-              baseDecimal: rawPoolState.baseDecimal,
-              quoteDecimal: rawPoolState.quoteDecimal
+            // Convert database snapshot to application snapshot
+            const dbSnapshot = snapshots[0] as DbPoolSnapshot;
+            const snapshot: AppPoolSnapshot = {
+                pool_id: dbSnapshot.pool_id,
+                timestamp: dbSnapshot.timestamp,
+                base_reserve: dbSnapshot.base_reserve,
+                quote_reserve: dbSnapshot.quote_reserve,
+                base_reserve_raw: dbSnapshot.base_reserve_raw,
+                quote_reserve_raw: dbSnapshot.quote_reserve_raw,
+                price: dbSnapshot.price,
+                price_change: dbSnapshot.price_change,
+                tvl: dbSnapshot.tvl,
+                volume_24h: dbSnapshot.volume_24h,
+                volume_change: dbSnapshot.volume_change,
+                buy_pressure: dbSnapshot.buy_pressure,
+                sell_pressure: dbSnapshot.sell_pressure,
+                market_pressure: dbSnapshot.market_pressure,
+                pressure_direction: dbSnapshot.pressure_direction as TrendDirection,
+                pressure_strength: dbSnapshot.pressure_strength,
+                pressure_severity: dbSnapshot.pressure_severity,
+                trade_count: dbSnapshot.trade_count,
+                trade_volume: dbSnapshot.trade_volume,
+                liquidity_change: dbSnapshot.liquidity_change,
+                price_impact: dbSnapshot.price_impact,
+                suspicious: dbSnapshot.suspicious,
+                risk_score: dbSnapshot.risk_score
             };
-
-            // Get vault balances with retry logic
-            const reserves = await this.getReservesWithRetry(poolState);
-            if (!reserves) {
-              console.warn(`Failed to get reserves for pool ${this.poolId}`);
-              return;
+            
+            // Calculate changes if we have a previous snapshot
+            if (this.lastSnapshot) {
+                snapshot.price_change = (snapshot.price - this.lastSnapshot.price) / this.lastSnapshot.price;
+                snapshot.volume_change = (snapshot.volume_24h - this.lastSnapshot.volume_24h) / this.lastSnapshot.volume_24h;
+                snapshot.liquidity_change = (
+                    (snapshot.base_reserve + snapshot.quote_reserve) - 
+                    (this.lastSnapshot.base_reserve + this.lastSnapshot.quote_reserve)
+                ) / (this.lastSnapshot.base_reserve + this.lastSnapshot.quote_reserve);
             }
 
-            // Create snapshot
-            const snapshot: PoolSnapshot = {
-              poolId: this.poolId,
-              timestamp: Date.now(),
-              slot: context.slot,
-              baseReserve: reserves.baseReserve,
-              quoteReserve: reserves.quoteReserve,
-              price: reserves.price,
-              priceChange: this.prevSnapshot ? ((reserves.price - this.prevSnapshot.price) / this.prevSnapshot.price) * 100 : 0,
-              tvl: reserves.baseReserve * reserves.price + reserves.quoteReserve,
-              volume24h: 0,
-              marketCap: 0,
-              volumeChange: 0,
-              suspicious: this.detectSuspiciousActivity(reserves),
-              poolState
-            };
+            // Update market pressure metrics
+            this.updateMarketPressure(snapshot);
 
-            // Update history
-            this.poolHistory.push(snapshot);
-            if (this.poolHistory.length > this.HISTORY_LENGTH) {
-              this.poolHistory.shift();
+            // Store the snapshot
+            this.lastSnapshot = snapshot;
+
+            // Call the update callback if set
+            if (this.updateCallback) {
+                this.updateCallback(snapshot);
             }
 
-            // Calculate market pressure
-            const pressure = this.analyzeMarketPressure(snapshot);
-
-            // Call update handler
-            this.onUpdate(
-              snapshot,
-              pressure,
-              this.prevSnapshot?.price || null,
-              this.prevSnapshot?.baseReserve || null,
-              this.prevSnapshot?.quoteReserve || null,
-              this.prevSnapshot
-            );
-
-            // Update previous snapshot
-            this.prevSnapshot = snapshot;
-
-            // Reset reconnect attempts on successful update
-            this.reconnectAttempts = 0;
-
-            // Log update
-            console.log(`📊 Pool ${this.poolId} update:
-Price: ${reserves.price.toFixed(8)}
-Base Reserve: ${reserves.baseReserve.toFixed(2)}
-Quote Reserve: ${reserves.quoteReserve.toFixed(2)}
-Price Change: ${snapshot.priceChange.toFixed(2)}%
-Market Pressure: ${pressure.value.toFixed(2)} (${pressure.direction})
-Strength: ${pressure.strength}
-Severity: ${pressure.severity}`);
-
-          } catch (error) {
-            console.error(`Error handling account change for pool ${this.poolId}:`, error);
-            this.handleConnectionError();
-          }
-        },
-        'confirmed'
-      );
-
-      console.log(`Successfully subscribed to pool ${this.poolId} with ID ${this.subscriptionId}`);
-    } catch (error) {
-      console.error(`Failed to subscribe to account changes for pool ${this.poolId}:`, error);
-      this.handleConnectionError();
-    }
-  }
-
-  private async getReservesWithRetry(poolState: RaydiumPoolState, maxRetries: number = 3): Promise<{ baseReserve: number; quoteReserve: number; price: number } | null> {
-    let attempts = 0;
-    while (attempts < maxRetries) {
-      try {
-        const [baseVaultBalance, quoteVaultBalance] = await Promise.all([
-          this.connection.getTokenAccountBalance(new PublicKey(poolState.baseVault)),
-          this.connection.getTokenAccountBalance(new PublicKey(poolState.quoteVault))
-        ]);
-
-        if (!baseVaultBalance.value || !quoteVaultBalance.value) {
-          throw new Error('Failed to fetch vault balances');
+        } catch (err) {
+            this.logger.error(`Error updating state for pool ${this.poolId}:`, err);
         }
+    }
 
-        const baseReserve = baseVaultBalance.value.uiAmount || 0;
-        const quoteReserve = quoteVaultBalance.value.uiAmount || 0;
+    private updateMarketPressure(snapshot: AppPoolSnapshot): void {
+        // Calculate buy/sell pressure based on recent trades
+        const buyVolume = snapshot.trade_volume * (1 + snapshot.price_change);
+        const sellVolume = snapshot.trade_volume * (1 - snapshot.price_change);
+        
+        snapshot.buy_pressure = buyVolume / (buyVolume + sellVolume);
+        snapshot.sell_pressure = sellVolume / (buyVolume + sellVolume);
+        
+        // Overall market pressure
+        snapshot.market_pressure = snapshot.buy_pressure - snapshot.sell_pressure;
+        
+        // Determine pressure direction and strength
+        snapshot.pressure_direction = snapshot.market_pressure > 0 ? TrendDirection.UP : TrendDirection.DOWN;
+        snapshot.pressure_strength = Math.abs(snapshot.market_pressure);
+        
+        // Calculate pressure severity based on volume and price impact
+        snapshot.pressure_severity = snapshot.pressure_strength * snapshot.price_impact;
+        
+        // Update risk score
+        snapshot.risk_score = this.calculateRiskScore(snapshot);
+    }
 
-        if (baseReserve === 0 || quoteReserve === 0) {
-          throw new Error('Zero reserves detected');
+    private calculateRiskScore(snapshot: AppPoolSnapshot): number {
+        let score = 0;
+        
+        // Price volatility
+        score += Math.abs(snapshot.price_change) * 10;
+        
+        // Volume concentration
+        if (snapshot.volume_24h > 0) {
+            const volumeConcentration = snapshot.trade_volume / snapshot.volume_24h;
+            score += volumeConcentration * 5;
         }
-
-        const price = quoteReserve / baseReserve;
-        if (!isFinite(price) || price <= 0) {
-          throw new Error('Invalid price calculated');
+        
+        // Market pressure extremes
+        score += snapshot.pressure_strength * 3;
+        
+        // Price impact
+        score += snapshot.price_impact * 2;
+        
+        // Suspicious activity
+        if (snapshot.suspicious) {
+            score += 5;
         }
-
-        return { baseReserve, quoteReserve, price };
-      } catch (error) {
-        attempts++;
-        if (attempts >= maxRetries) {
-          console.error(`Failed to get reserves after ${maxRetries} attempts:`, error);
-          return null;
-        }
-        await new Promise(resolve => setTimeout(resolve, 1000 * attempts));
-      }
+        
+        return Math.min(100, score);
     }
-    return null;
-  }
-
-  private detectSuspiciousActivity(reserves: { baseReserve: number; quoteReserve: number; price: number }): boolean {
-    if (!this.prevSnapshot) return false;
-
-    // Check for massive price drop
-    const priceDrop = ((this.prevSnapshot.price - reserves.price) / this.prevSnapshot.price) * 100;
-    if (priceDrop > 80) return true;
-
-    // Check for massive reserve changes
-    const baseReserveChange = Math.abs((reserves.baseReserve - this.prevSnapshot.baseReserve) / this.prevSnapshot.baseReserve) * 100;
-    const quoteReserveChange = Math.abs((reserves.quoteReserve - this.prevSnapshot.quoteReserve) / this.prevSnapshot.quoteReserve) * 100;
-    
-    if (baseReserveChange > 500 || quoteReserveChange > 500) return true;
-
-    // Check for suspicious price levels
-    if (reserves.price < 0.000001 || reserves.price > 1000000) return true;
-
-    return false;
-  }
-
-  private unsubscribeFromAccountChanges(): void {
-    if (this.subscriptionId === null) {
-      console.warn(`Not subscribed to pool ${this.poolId}`);
-      return;
-    }
-
-    try {
-      console.log(`Unsubscribing from account changes for pool ${this.poolId}`);
-      
-      this.connection.removeAccountChangeListener(this.subscriptionId);
-      this.subscriptionId = null;
-    } catch (error) {
-      console.error(`Failed to unsubscribe from account changes for pool ${this.poolId}:`, error);
-    }
-  }
-
-  private handleConnectionError(): void {
-    if (this.reconnectAttempts >= this.MAX_RECONNECT_ATTEMPTS) {
-      console.error(`Max reconnection attempts reached for pool ${this.poolId}, will retry after cooldown`);
-      // Reset attempts after a longer cooldown period
-      setTimeout(() => {
-        this.reconnectAttempts = 0;
-        this.subscribeToAccountChanges();
-      }, this.RECONNECT_DELAY * 10); // 10x normal delay for cooldown
-      return;
-    }
-
-    this.reconnectAttempts++;
-    const delay = Math.min(
-      this.RECONNECT_DELAY * Math.pow(2, this.reconnectAttempts - 1), // Exponential backoff
-      30000 // Max 30 second delay
-    );
-    
-    console.warn(`Connection error for pool ${this.poolId}, attempt ${this.reconnectAttempts}/${this.MAX_RECONNECT_ATTEMPTS}, retrying in ${delay/1000}s`);
-    
-    // Unsubscribe before reconnecting
-    this.unsubscribeFromAccountChanges();
-    
-    // Attempt to reconnect after delay with exponential backoff
-    setTimeout(() => {
-      this.subscribeToAccountChanges();
-    }, delay);
-  }
-
-  private analyzeMarketPressure(snapshot: PoolSnapshot): MarketPressure {
-    if (this.poolHistory.length < 2) {
-      return {
-        value: 50,
-        direction: TrendDirection.Sideways,
-        strength: 0,
-        severity: 'low',
-        buyPressure: 50,
-        sellPressure: 50,
-        rugRisk: 0,
-        trend: TrendDirection.Sideways
-      };
-    }
-
-    const previous = this.poolHistory[this.poolHistory.length - 2];
-    const priceChange = snapshot.priceChange;
-    const reserveRatio = snapshot.baseReserve / snapshot.quoteReserve;
-    const previousRatio = previous.baseReserve / previous.quoteReserve;
-
-    // Calculate pressures
-    let buyPressure = 50;
-    let sellPressure = 50;
-
-    if (priceChange > 0) {
-      buyPressure = Math.min(100, 50 + (priceChange * 10));
-      sellPressure = Math.max(0, 50 - (priceChange * 10));
-    } else {
-      sellPressure = Math.min(100, 50 + (Math.abs(priceChange) * 10));
-      buyPressure = Math.max(0, 50 - (Math.abs(priceChange) * 10));
-    }
-
-    // Calculate rug risk
-    const rugRisk = this.calculateRugRisk();
-
-    // Determine trend
-    const trend = this.determineTrend();
-
-    // Calculate overall pressure
-    const pressureValue = (buyPressure - sellPressure + 100) / 2;
-    const direction = pressureValue > 60 ? TrendDirection.Up : 
-                     pressureValue < 40 ? TrendDirection.Down : 
-                     TrendDirection.Sideways;
-
-    // Determine strength and severity
-    const strength = Math.abs(pressureValue - 50);
-    const severity = rugRisk > 70 ? 'high' : 
-                    rugRisk > 40 ? 'medium' : 'low';
-
-    return {
-      value: pressureValue,
-      direction,
-      strength,
-      severity,
-      buyPressure,
-      sellPressure,
-      rugRisk,
-      trend
-    };
-  }
-
-  private calculateRugRisk(): number {
-    if (this.poolHistory.length < 10) return 0;
-
-    const recent = this.poolHistory.slice(-10);
-    const oldest = recent[0];
-    const newest = recent[recent.length - 1];
-
-    // Check for massive price drop
-    const priceDropPercent = ((oldest.price - newest.price) / oldest.price) * 100;
-    if (priceDropPercent > 80) return 95;
-
-    // Check for massive supply increase
-    const baseReserveIncrease = ((newest.baseReserve - oldest.baseReserve) / oldest.baseReserve) * 100;
-    if (baseReserveIncrease > 500) return 90;
-
-    // Check for liquidity drain
-    const liquidityChange = ((newest.tvl - oldest.tvl) / oldest.tvl) * 100;
-    if (liquidityChange < -70) return 85;
-
-    return Math.max(0, priceDropPercent + baseReserveIncrease * 0.2);
-  }
-
-  private determineTrend(): TrendDirection {
-    if (this.poolHistory.length < 5) return TrendDirection.Sideways;
-
-    const recent = this.poolHistory.slice(-5);
-    const prices = recent.map(h => h.price);
-
-    // Simple linear regression
-    const n = prices.length;
-    const sumX = n * (n - 1) / 2;
-    const sumY = prices.reduce((a, b) => a + b, 0);
-    const sumXY = prices.reduce((sum, price, i) => sum + i * price, 0);
-    const sumX2 = n * (n - 1) * (2 * n - 1) / 6;
-
-    const slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
-
-    if (slope > 0.001) return TrendDirection.Up;
-    if (slope < -0.001) return TrendDirection.Down;
-    return TrendDirection.Sideways;
-  }
 }

@@ -1,6 +1,6 @@
 import { Connection, PublicKey } from '@solana/web3.js';
-import { PoolMonitor } from './monitor';
-import { MonitorConfig, MonitorAlert, PoolReserves, TradeActivity, PriceState } from './types/monitor.types';
+import { PoolMonitor } from './monitor.js';
+import { MonitorConfig, MonitorAlert, PoolReserves, TradeActivity, PriceState } from './types/monitor.types.js';
 import * as dotenv from 'dotenv';
 
 dotenv.config();

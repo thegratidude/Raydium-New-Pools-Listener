@@ -5,18 +5,18 @@ import {
   PartiallyDecodedInstruction,
   PublicKey,
 } from '@solana/web3.js';
-import { sleep } from '../../utils/sleep';
-import { liuquidityPoolIndex, quoteIndex, tokenMintIndex } from './constants';
-// import { getPoolMonitor } from './pool-monitor';
-import { PendingPoolManager } from '../../monitor/pending-pool-manager';
-import { PoolMonitorManager } from '../../monitor/pool-monitor-manager';
-import { insertPoolHistory, initPoolHistoryDB } from '../../monitor/pool-history-db';
-import { simulateRoundTripTrade } from '../../monitor/utils';
+import { sleep } from '../../utils/sleep.js';
+import { liuquidityPoolIndex, quoteIndex, tokenMintIndex } from './constants.js';
+// import { getPoolMonitor } from './pool-monitor.js';
+import { PendingPoolManager } from '../../monitor/pending-pool-manager.js';
+import { PoolMonitorManager } from '../../monitor/pool-monitor-manager.js';
+import { insertPoolHistory, initPoolHistoryDB } from '../../monitor/pool-history-db.js';
+import { simulateRoundTripTrade } from '../../monitor/utils.js';
 import * as dotenv from 'dotenv';
-import { senseTop, DEFAULT_PLATEAU_WINDOW } from '../../utils/senseTop';
-import { PoolMonitorService } from '../../monitor/pool-monitor.service';
+import { senseTop, DEFAULT_PLATEAU_WINDOW } from '../../utils/senseTop.js';
+import { PoolMonitorService } from '../../monitor/pool-monitor.service.js';
 import { NestFactory } from '@nestjs/core';
-import { AppModule } from '../../app.module';
+import { AppModule } from '../../app.module.js';
 dotenv.config();
 
 const HTTP_URL = process.env.HTTP_URL!;
@@ -32,6 +32,8 @@ let poolMonitorService: PoolMonitorService;
 let poolMonitorManager: PoolMonitorManager;
 let pendingPoolManager: PendingPoolManager;
 
+const logger = new Logger('RaydiumListener');
+
 export async function initializeServices(app: INestApplication) {
   // Get services from the existing NestJS container
   poolMonitorService = app.get(PoolMonitorService);
@@ -39,11 +41,10 @@ export async function initializeServices(app: INestApplication) {
   
   // Create PendingPoolManager with injected services
   pendingPoolManager = new PendingPoolManager(
-    app.get(Connection),
-    poolMonitorService
+    app.get(Connection)
   );
   
-  console.log('✅ Services initialized: PoolMonitorService and PoolMonitorManager');
+  logger.debug('Services initialized');
 }
 
 // Add a mapping from mint addresses to symbols and decimals
@@ -101,11 +102,11 @@ function conciseOnUpdate(snapshot, pressure, tokenA, tokenB, originPrice, origin
 
   // Check for top
   if (senseTop(history)) {
-    console.log('\x1b[41m\x1b[97m***************** TOP IDENTIFIED *********************\x1b[0m');
+    logger.log('\x1b[41m\x1b[97m***************** TOP IDENTIFIED *********************\x1b[0m');
   }
 
   // Print concise output: truncated base mint, /SOL, price, TVL, base/quote reserves, profit
-  console.log(
+  logger.log(
     `${pairStr} | $${snapshot.price.toFixed(4)} | TVL $${tvlK} | Base: ${snapshot.baseReserve.toFixed(2)} | Quote: ${snapshot.quoteReserve.toFixed(2)} | ${profitStr}`
   );
 }
@@ -113,7 +114,7 @@ function conciseOnUpdate(snapshot, pressure, tokenA, tokenB, originPrice, origin
 // Health check: count messages seen
 let messageCount = 0;
 setInterval(() => {
-  console.log(`🩺 Health check: ${messageCount} messages seen in the last minute`);
+  logger.log(`Health check: ${messageCount} messages seen in the last minute`);
   messageCount = 0;
 }, 60_000);
 
@@ -128,34 +129,34 @@ const RAYDIUM_PUBLIC_KEY = '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8';
 
 // Modify the pool detection handler
 async function handleNewPool(liquidityPoolAddressAccount: string, tokenAAccount: PublicKey, tokenBAccount: PublicKey) {
-  console.log('\n📊 Pool Details:');
-  console.log('════════════════════════════════════════════════════════════════════════════════');
-  console.log(`Token A: ${tokenAAccount.toBase58()}`);
-  console.log(`Token B: ${tokenBAccount.toBase58()}`);
-  console.log(`Pool Address: ${liquidityPoolAddressAccount}`);
-  console.log('════════════════════════════════════════════════════════════════════════════════\n');
+  logger.log('Pool Details:');
+  logger.log('----------------------------------------');
+  logger.log(`Token A: ${tokenAAccount.toBase58()}`);
+  logger.log(`Token B: ${tokenBAccount.toBase58()}`);
+  logger.log(`Pool Address: ${liquidityPoolAddressAccount}`);
+  logger.log('----------------------------------------');
 
   if (liquidityPoolAddressAccount) {
-    console.log(`\n➕ Adding pool to monitor service: ${liquidityPoolAddressAccount}`);
+    logger.log(`Adding pool to monitor service: ${liquidityPoolAddressAccount}`);
     
     // Add pool to PoolMonitorService which will handle both broadcast and monitoring
-    poolMonitorService.addNewPool(
+    poolMonitorService.addPool(
       liquidityPoolAddressAccount,
       tokenAAccount.toBase58(),
       tokenBAccount.toBase58()
     );
   } else {
-    console.log('❌ Missing liquidity pool address, skipping pool');
+    logger.warn('Missing liquidity pool address, skipping pool');
   }
 }
 
 // Update the fetchRaydiumMints function to use the new handler
 async function fetchRaydiumMints(txId: string, connection: Connection) {
   try {
-    console.log('\n🔍 Processing Transaction:');
-    console.log('════════════════════════════════════════════════════════════════════════════════');
-    console.log(`Transaction ID: ${txId}`);
-    console.log('════════════════════════════════════════════════════════════════════════════════\n');
+    logger.log('Processing Transaction:');
+    logger.log('----------------------------------------');
+    logger.log(`Transaction ID: ${txId}`);
+    logger.log('----------------------------------------');
 
     const tx = await connection.getParsedTransaction(txId, {
       maxSupportedTransactionVersion: 0,
@@ -163,7 +164,7 @@ async function fetchRaydiumMints(txId: string, connection: Connection) {
     });
 
     if (!tx) {
-      console.log('❌ Transaction not found:', txId);
+      logger.warn(`Transaction not found: ${txId}`);
       return;
     }
 
@@ -202,35 +203,33 @@ async function fetchRaydiumMints(txId: string, connection: Connection) {
 
       await handleNewPool(liquidityPoolAddressAccount, tokenAAccount, tokenBAccount);
     } else {
-      console.log('❌ No Raydium instruction found in transaction');
+      logger.warn('No Raydium instruction found in transaction');
     }
   } catch (error) {
-    console.error('❌ Error processing transaction:', error);
+    logger.error('Error processing transaction:', error);
   }
 }
 
 export async function startConnection(
   app: INestApplication,
   connection: Connection,
-  programAddress: PublicKey,
-  searchInstruction: string,
-): Promise<void> {
-  // Initialize services with the app instance
+  programId: PublicKey,
+  instructionName: string
+) {
   await initializeServices(app);
-
-  console.log('Monitoring logs for program:', programAddress.toString());
+  
+  logger.log(`Monitoring Raydium program: ${programId.toString()}`);
   connection.onLogs(
-    programAddress,
+    programId,
     ({ logs, err, signature }) => {
       if (err) return;
 
       // Increment message count for every log event
       messageCount++;
 
-      if (logs && logs.some((log) => log.includes(searchInstruction))) {
-        console.log(
-          "Signature for 'initialize2':",
-          `https://explorer.solana.com/tx/${signature}`,
+      if (logs && logs.some((log) => log.includes(instructionName))) {
+        logger.log(
+          `Signature for 'initialize2': https://explorer.solana.com/tx/${signature}`
         );
         fetchRaydiumMints(signature, connection);
       }

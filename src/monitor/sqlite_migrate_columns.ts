@@ -1,8 +1,15 @@
 import * as path from 'path';
-const Database = require('better-sqlite3');
+import * as sqlite3 from 'sqlite3';
+import { promisify } from 'util';
 
 const dbPath = path.join(process.cwd(), 'pool_history.sqlite');
-const db = new Database(dbPath);
+const db = new sqlite3.Database(dbPath);
+
+// Promisify common database operations
+const dbRun = promisify(db.run.bind(db));
+const dbGet = promisify(db.get.bind(db));
+const dbAll = promisify(db.all.bind(db));
+const dbExec = promisify(db.exec.bind(db));
 
 // Define the desired columns and their types
 const desiredColumns: { name: string; type: string }[] = [
@@ -16,22 +23,36 @@ const desiredColumns: { name: string; type: string }[] = [
 ];
 
 // Get current columns in the table
-function getCurrentColumns(table: string): string[] {
-  const stmt = db.prepare(`PRAGMA table_info(${table})`);
-  const rows = stmt.all();
+async function getCurrentColumns(table: string): Promise<string[]> {
+  const rows = await dbAll(`PRAGMA table_info(${table})`);
   return rows.map((row: any) => row.name);
 }
 
-function addMissingColumns(table: string, desired: { name: string; type: string }[]) {
-  const current = getCurrentColumns(table);
-  for (const col of desired) {
-    if (!current.includes(col.name)) {
-      console.log(`Adding column ${col.name} (${col.type}) to ${table}...`);
-      db.exec(`ALTER TABLE ${table} ADD COLUMN ${col.name} ${col.type};`);
+// Add missing columns to a table
+async function addMissingColumns(table: string, columns: { name: string; type: string }[]) {
+  const currentColumns = await getCurrentColumns(table);
+  
+  for (const column of columns) {
+    if (!currentColumns.includes(column.name)) {
+      console.log(`Adding column ${column.name} to ${table}...`);
+      await dbRun(`ALTER TABLE ${table} ADD COLUMN ${column.name} ${column.type}`);
     }
   }
 }
 
-addMissingColumns('active_pools', desiredColumns);
+// Main migration function
+async function migrateColumns() {
+  try {
+    // Add missing columns to pool_history table
+    await addMissingColumns('pool_history', desiredColumns);
+    console.log('Migration completed successfully');
+  } catch (err) {
+    console.error('Migration failed:', err);
+    throw err;
+  } finally {
+    db.close();
+  }
+}
 
-console.log('Migration complete.'); 
+// Run migration
+migrateColumns().catch(console.error); 

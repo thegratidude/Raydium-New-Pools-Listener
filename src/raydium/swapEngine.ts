@@ -1,6 +1,6 @@
 import { Connection, Keypair, PublicKey } from '@solana/web3.js';
-import { insertSwapTx } from '../monitor/pool-history-db';
-import { decodeRaydiumPoolState } from '../monitor/raydium-layout';
+import { insertSwapTx } from '../monitor/pool-history-db.js';
+import { decodeRaydiumPoolState } from '../monitor/raydium-layout.js';
 // TODO: Import or define direct Raydium v4 swap helpers from artifact
 // import { buildDirectSwapInstruction, ... } from './raydiumDirectSwapHelpers';
 

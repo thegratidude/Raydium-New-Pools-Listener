@@ -1,5 +1,5 @@
 import { Connection } from '@solana/web3.js';
-import { analyzePool } from './analyzer';
+import { analyzePool } from './analyzer.js';
 import * as dotenv from 'dotenv';
 
 dotenv.config();

@@ -1,10 +1,24 @@
 import { NestFactory } from '@nestjs/core';
-import { AppModule } from './app.module';
-import { startConnection } from './scripts/new-raydium-pools/listener';
+import { AppModule } from './app.module.js';
+import { startConnection } from './scripts/new-raydium-pools/listener.js';
 import { Connection, PublicKey } from '@solana/web3.js';
 import * as dotenv from 'dotenv';
 import { execSync } from 'child_process';
 import { Logger } from '@nestjs/common';
+
+// Suppress all non-critical warnings
+process.on('warning', (warning) => {
+  // Suppress specific warnings we know about
+  if (
+    warning.name === 'DeprecationWarning' || // Suppress all deprecation warnings
+    warning.message.includes('punycode') || // Suppress punycode warning
+    warning.message.includes('bigint') // Suppress bigint warning
+  ) {
+    return;
+  }
+  // Log other warnings that might be important
+  console.warn(warning);
+});
 
 // Kill any process using port 5001 (macOS/Linux only)
 try {
@@ -31,7 +45,11 @@ async function bootstrap() {
     // Disable the built-in HTTP server since we're using our own
     bodyParser: true,
     cors: true,
+    logger: ['error', 'warn', 'log'], // Only show error, warn, and log levels
   });
+
+  // Configure minimal logging
+  app.useLogger(new Logger('App'));
 
   const corsOptions = {
     origin: '*',
@@ -46,7 +64,7 @@ async function bootstrap() {
   // Initialize the application and wait for all modules to be ready
   await app.init();
   
-  logger.log('Application ready - Socket.IO server will start automatically');
+  logger.log('Application ready');
 
   // Start the pool listener with the existing app instance
   await startConnection(app, rpcConnection, RAYDIUM, INSTRUCTION_NAME);

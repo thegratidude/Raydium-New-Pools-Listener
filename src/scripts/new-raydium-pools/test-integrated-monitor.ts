@@ -1,5 +1,5 @@
 import { Connection } from '@solana/web3.js';
-import { getPoolMonitor } from './pool-monitor';
+import { getPoolMonitor } from './pool-monitor.js';
 import * as dotenv from 'dotenv';
 
 dotenv.config();

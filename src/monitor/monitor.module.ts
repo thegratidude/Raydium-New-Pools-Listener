@@ -1,8 +1,8 @@
 import { Module } from '@nestjs/common';
-import { PoolMonitorService } from './pool-monitor.service';
-import { PoolMonitorManager } from './pool-monitor-manager';
+import { PoolMonitorService } from './pool-monitor.service.js';
+import { PoolMonitorManager } from './pool-monitor-manager.js';
 import { Connection } from '@solana/web3.js';
-import { GatewayModule } from '../gateway/gateway.module';
+import { GatewayModule } from '../gateway/gateway.module.js';
 
 @Module({
   imports: [GatewayModule],
