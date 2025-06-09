@@ -366,4 +366,121 @@ class DatabaseManager:
             return [dict(row) for row in cursor.fetchall()]
         except Exception as e:
             logger.error(f"Error retrieving pool history: {e}")
-            return [] 
+            return []
+
+    # Pending Pool Methods
+    def store_pending_pool(self, pool_data: Dict[str, Any]) -> bool:
+        """Store a pending pool in the database."""
+        try:
+            now = int(time.time())
+            now_pst = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            with self.conn:
+                cursor = self.conn.execute("""
+                    INSERT OR REPLACE INTO pending_pools (
+                        pool_id, base_mint, quote_mint, base_decimals, quote_decimals,
+                        state, first_seen, first_seen_pst, last_checked, last_checked_pst,
+                        initial_price, updated_at, updated_at_pst
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    pool_data['pool_id'],
+                    pool_data['base_mint'],
+                    pool_data['quote_mint'],
+                    pool_data.get('base_decimals', 9),
+                    pool_data.get('quote_decimals', 6),
+                    pool_data.get('state', 'pending'),
+                    now,
+                    now_pst,
+                    now,
+                    now_pst,
+                    pool_data.get('initial_price', 0.0),
+                    now,
+                    now_pst
+                ))
+                return cursor.rowcount > 0
+        except sqlite3.Error as e:
+            logger.error(f"Error storing pending pool {pool_data['pool_id']}: {e}")
+            return False
+
+    def get_pending_pools(self, state: str = None) -> List[Dict[str, Any]]:
+        """Get pending pools from the database, optionally filtered by state."""
+        try:
+            if state:
+                cursor = self.conn.execute("""
+                    SELECT * FROM pending_pools 
+                    WHERE state = ? 
+                    ORDER BY first_seen DESC
+                """, (state,))
+            else:
+                cursor = self.conn.execute("""
+                    SELECT * FROM pending_pools 
+                    ORDER BY first_seen DESC
+                """)
+            return [dict(row) for row in cursor.fetchall()]
+        except sqlite3.Error as e:
+            logger.error(f"Error retrieving pending pools: {e}")
+            return []
+
+    def update_pending_pool_state(self, pool_id: str, state: str, **kwargs) -> bool:
+        """Update a pending pool's state and other fields."""
+        try:
+            now = int(time.time())
+            now_pst = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            # Build dynamic update query based on provided fields
+            update_fields = ["state = ?", "updated_at = ?", "updated_at_pst = ?"]
+            values = [state, now, now_pst]
+            
+            # Add timestamp fields based on state
+            if state == 'exists':
+                update_fields.extend(["exists_since = ?", "exists_since_pst = ?"])
+                values.extend([now, now_pst])
+            elif state == 'ready':
+                update_fields.extend(["ready_since = ?", "ready_since_pst = ?"])
+                values.extend([now, now_pst])
+            elif state == 'failed':
+                update_fields.extend(["failed_at = ?", "failed_at_pst = ?"])
+                values.extend([now, now_pst])
+            
+            # Add other provided fields
+            for key, value in kwargs.items():
+                if key in ['attempts', 'error', 'initial_price', 'last_checked', 'last_readiness_check']:
+                    update_fields.append(f"{key} = ?")
+                    values.append(value)
+            
+            values.append(pool_id)  # Add pool_id for WHERE clause
+            
+            with self.conn:
+                cursor = self.conn.execute(f"""
+                    UPDATE pending_pools 
+                    SET {', '.join(update_fields)}
+                    WHERE pool_id = ?
+                """, values)
+                return cursor.rowcount > 0
+        except sqlite3.Error as e:
+            logger.error(f"Error updating pending pool {pool_id}: {e}")
+            return False
+
+    def remove_pending_pool(self, pool_id: str) -> bool:
+        """Remove a pending pool from the database."""
+        try:
+            with self.conn:
+                cursor = self.conn.execute("DELETE FROM pending_pools WHERE pool_id = ?", (pool_id,))
+                return cursor.rowcount > 0
+        except sqlite3.Error as e:
+            logger.error(f"Error removing pending pool {pool_id}: {e}")
+            return False
+
+    def cleanup_old_pending_pools(self, max_age_hours: int = 2) -> int:
+        """Remove pending pools older than the specified age."""
+        try:
+            cutoff_time = int(time.time()) - (max_age_hours * 3600)
+            with self.conn:
+                cursor = self.conn.execute("""
+                    DELETE FROM pending_pools 
+                    WHERE first_seen < ?
+                """, (cutoff_time,))
+                return cursor.rowcount
+        except sqlite3.Error as e:
+            logger.error(f"Error cleaning up old pending pools: {e}")
+            return 0 

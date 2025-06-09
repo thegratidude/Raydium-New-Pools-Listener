@@ -2,6 +2,8 @@ import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/commo
 import { Connection } from '@solana/web3.js';
 import { PoolMonitorManager } from './pool-monitor-manager';
 import { TokenInfo } from '../types/token';
+import * as fs from 'fs';
+import * as path from 'path';
 
 export interface PendingPool {
   pool_id: string;
@@ -28,6 +30,7 @@ export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
   private isInitialized = false;
   private lastStatusLogTime = 0;
   private readonly STATUS_LOG_INTERVAL = 30000; // 30 seconds
+  private readonly PENDING_POOLS_FILE = 'pending_pools.json';
 
   constructor(
     private readonly connection: Connection,
@@ -44,6 +47,9 @@ export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
       this.logger.log('[PendingPoolManager] Initializing...');
       this.isInitialized = true;
       
+      // Load pending pools from file
+      await this.loadPendingPools();
+      
       // Start monitoring for any pools that are already in indexed state
       this.startMonitoringForExistingIndexedPools();
     } catch (error) {
@@ -54,8 +60,90 @@ export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
 
   async onModuleDestroy() {
     this.logger.log('[PendingPoolManager] Shutting down...');
+    
+    // Save pending pools to file before clearing
+    await this.savePendingPools();
+    
     this.pendingPools.clear();
     this.isInitialized = false;
+  }
+
+  private async savePendingPools(): Promise<void> {
+    try {
+      const poolsData = Array.from(this.pendingPools.values()).map(pool => ({
+        ...pool,
+        // Convert TokenInfo objects to serializable format
+        token_a: {
+          symbol: pool.token_a.symbol,
+          mint: pool.token_a.mint,
+          decimals: pool.token_a.decimals
+        },
+        token_b: {
+          symbol: pool.token_b.symbol,
+          mint: pool.token_b.mint,
+          decimals: pool.token_b.decimals
+        }
+      }));
+      
+      await fs.promises.writeFile(this.PENDING_POOLS_FILE, JSON.stringify(poolsData, null, 2));
+      this.logger.log(`[PendingPoolManager] Saved ${poolsData.length} pending pools to file`);
+    } catch (error) {
+      this.logger.error('[PendingPoolManager] Failed to save pending pools:', error instanceof Error ? error.message : 'Unknown error');
+    }
+  }
+
+  private async loadPendingPools(): Promise<void> {
+    try {
+      if (!fs.existsSync(this.PENDING_POOLS_FILE)) {
+        this.logger.log('[PendingPoolManager] No pending pools file found, starting fresh');
+        return;
+      }
+
+      const data = await fs.promises.readFile(this.PENDING_POOLS_FILE, 'utf8');
+      const poolsData = JSON.parse(data) as any[];
+      
+      const now = Date.now();
+      const TWO_HOURS_MS = 2 * 60 * 60 * 1000; // 2 hours in milliseconds
+      
+      let loadedCount = 0;
+      let expiredCount = 0;
+      
+      for (const poolData of poolsData) {
+        // Check if pool is older than 2 hours
+        const poolAge = now - poolData.last_update_time;
+        if (poolAge > TWO_HOURS_MS) {
+          expiredCount++;
+          continue;
+        }
+        
+        // Restore TokenInfo objects
+        const pool: PendingPool = {
+          pool_id: poolData.pool_id,
+          token_a: {
+            symbol: poolData.token_a.symbol,
+            mint: poolData.token_a.mint,
+            decimals: poolData.token_a.decimals
+          },
+          token_b: {
+            symbol: poolData.token_b.symbol,
+            mint: poolData.token_b.mint,
+            decimals: poolData.token_b.decimals
+          },
+          state: poolData.state,
+          last_update_time: poolData.last_update_time,
+          last_trade_time: poolData.last_trade_time,
+          trade_count: poolData.trade_count,
+          reserve_changes: poolData.reserve_changes
+        };
+        
+        this.pendingPools.set(pool.pool_id, pool);
+        loadedCount++;
+      }
+      
+      this.logger.log(`[PendingPoolManager] Loaded ${loadedCount} pending pools, skipped ${expiredCount} expired pools`);
+    } catch (error) {
+      this.logger.error('[PendingPoolManager] Failed to load pending pools:', error instanceof Error ? error.message : 'Unknown error');
+    }
   }
 
   addPool(pool_id: string, token_a: TokenInfo, token_b: TokenInfo) {
@@ -78,6 +166,11 @@ export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
       last_update_time: Date.now(),
       trade_count: 0,
       reserve_changes: 0
+    });
+
+    // Save to file after adding
+    this.savePendingPools().catch(error => {
+      this.logger.error('[PendingPoolManager] Failed to save after adding pool:', error instanceof Error ? error.message : 'Unknown error');
     });
   }
 
@@ -108,6 +201,11 @@ export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
         this.onPoolReady(pool);
         this.pendingPools.delete(pool_id);
       }
+
+      // Save to file after trade data update
+      this.savePendingPools().catch(error => {
+        this.logger.error('[PendingPoolManager] Failed to save after trade data update:', error instanceof Error ? error.message : 'Unknown error');
+      });
     }
   }
 
@@ -293,6 +391,11 @@ export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
       this.onPoolReady(pool);
       this.pendingPools.delete(pool_id);
     }
+
+    // Save to file after state change
+    this.savePendingPools().catch(error => {
+      this.logger.error('[PendingPoolManager] Failed to save after state change:', error instanceof Error ? error.message : 'Unknown error');
+    });
   }
 
   public removePool(pool_id: string) {
