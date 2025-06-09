@@ -243,6 +243,7 @@ export class PoolMonitor {
   private tradeCount: number = 0;
   private readonly TRADE_THRESHOLD = 1; // Ready after first reserve change
   private readonly TRADE_WINDOW = 30000; // 30 seconds window
+  private readonly RESERVE_CHANGE_THRESHOLD = 0.0005; // 0.05% - ultra sensitive for early detection
 
   constructor(options: PoolMonitorOptions) {
     this.connection = new Connection(options.httpUrl, {
@@ -318,63 +319,98 @@ export class PoolMonitor {
         
         if (!this.firstTradeTime) {
           this.firstTradeTime = Date.now();
-          this.logger.log(`🔥 First trade detected for pool ${this.poolId.toBase58()}`);
+          this.logger.log(`🔥 FIRST TRADE DETECTED for pool ${this.poolId.toBase58()} - IMMEDIATE NOTIFICATION!`);
           this.logger.log(`  Initial reserves: ${baseReserve} ${this.tokenA.symbol} / ${quoteReserve} ${this.tokenB.symbol}`);
+          
+          // IMMEDIATE NOTIFICATION for early entry - no waiting!
+          this.onUpdate({
+            pool_id: this.poolId.toString(),
+            base_token: this.tokenA.symbol,
+            quote_token: this.tokenB.symbol,
+            base_reserve: baseReserve,
+            quote_reserve: quoteReserve,
+            price: quoteReserve / baseReserve,
+            tvl: quoteReserve * 2,
+            market_pressure: this.calculateMarketPressure({
+              poolId: this.poolId.toString(),
+              timestamp: Date.now(),
+              slot: 0,
+              baseReserve: baseReserve,
+              quoteReserve: quoteReserve,
+              price: quoteReserve / baseReserve,
+              priceChange: 0,
+              tvl: quoteReserve * 2,
+              marketCap: 0,
+              volumeChange: 0,
+              volume24h: pool.day?.volume || 0,
+              suspicious: false,
+              baseDecimals: pool.mintA.decimals || 9,
+              quoteDecimals: pool.mintB.decimals || 6,
+              buySlippage: 0,
+              sellSlippage: 0,
+              reserveRatio: quoteReserve / baseReserve,
+              initialReserveRatio: this.initialReserveRatio,
+              ratioChange: 0
+            }).value,
+            trade_count: 1,
+            reserve_change_percent: 0.05, // Small change detected
+            time_since_first_trade: 0,
+            has_trade_data: true,
+            timestamp: Date.now()
+          });
         } else {
           const timeSinceFirstTrade = Date.now() - this.firstTradeTime;
           this.logger.log(`Trade #${this.tradeCount} detected (${timeSinceFirstTrade/1000}s since first trade)`);
         }
 
-        // Calculate reserve changes
+        // Calculate reserve changes for additional trades
         const baseReserveChange = this.lastBaseReserve ? 
           Math.abs(((baseReserve - this.lastBaseReserve) / this.lastBaseReserve) * 100) : 0;
         const quoteReserveChange = this.lastQuoteReserve ? 
           Math.abs(((quoteReserve - this.lastQuoteReserve) / this.lastQuoteReserve) * 100) : 0;
         const maxReserveChange = Math.max(baseReserveChange, quoteReserveChange);
 
-        // If we've seen enough trades within our window, notify
-        if (this.tradeCount >= this.TRADE_THRESHOLD) {
+        // For subsequent trades, still notify but with more data
+        if (this.tradeCount > 1) {
           const timeSinceFirstTrade = Date.now() - (this.firstTradeTime || 0);
           
-          if (timeSinceFirstTrade <= this.TRADE_WINDOW) {
-            this.logger.log(`🎯 Pool ${this.poolId.toBase58()} is ready! Seen ${this.tradeCount} trades in ${(timeSinceFirstTrade/1000).toFixed(1)}s with ${maxReserveChange.toFixed(2)}% max reserve change`);
-            
-            this.onUpdate({
-              pool_id: this.poolId.toString(),
-              base_token: this.tokenA.symbol,
-              quote_token: this.tokenB.symbol,
-              base_reserve: baseReserve,
-              quote_reserve: quoteReserve,
+          this.logger.log(`🎯 Additional trade #${this.tradeCount} for pool ${this.poolId.toBase58()} - ${maxReserveChange.toFixed(2)}% reserve change`);
+          
+          this.onUpdate({
+            pool_id: this.poolId.toString(),
+            base_token: this.tokenA.symbol,
+            quote_token: this.tokenB.symbol,
+            base_reserve: baseReserve,
+            quote_reserve: quoteReserve,
+            price: quoteReserve / baseReserve,
+            tvl: quoteReserve * 2,
+            market_pressure: this.calculateMarketPressure({
+              poolId: this.poolId.toString(),
+              timestamp: Date.now(),
+              slot: 0,
+              baseReserve: baseReserve,
+              quoteReserve: quoteReserve,
               price: quoteReserve / baseReserve,
+              priceChange: 0,
               tvl: quoteReserve * 2,
-              market_pressure: this.calculateMarketPressure({
-                poolId: this.poolId.toString(),
-                timestamp: Date.now(),
-                slot: 0,
-                baseReserve: baseReserve,
-                quoteReserve: quoteReserve,
-                price: quoteReserve / baseReserve,
-                priceChange: 0,
-                tvl: quoteReserve * 2,
-                marketCap: 0,
-                volumeChange: 0,
-                volume24h: pool.day?.volume || 0,
-                suspicious: false,
-                baseDecimals: pool.mintA.decimals || 9,
-                quoteDecimals: pool.mintB.decimals || 6,
-                buySlippage: 0,
-                sellSlippage: 0,
-                reserveRatio: quoteReserve / baseReserve,
-                initialReserveRatio: this.initialReserveRatio,
-                ratioChange: 0
-              }).value,
-              trade_count: this.tradeCount,
-              reserve_change_percent: maxReserveChange,
-              time_since_first_trade: timeSinceFirstTrade,
-              has_trade_data: true,
-              timestamp: Date.now()
-            });
-          }
+              marketCap: 0,
+              volumeChange: 0,
+              volume24h: pool.day?.volume || 0,
+              suspicious: false,
+              baseDecimals: pool.mintA.decimals || 9,
+              quoteDecimals: pool.mintB.decimals || 6,
+              buySlippage: 0,
+              sellSlippage: 0,
+              reserveRatio: quoteReserve / baseReserve,
+              initialReserveRatio: this.initialReserveRatio,
+              ratioChange: 0
+            }).value,
+            trade_count: this.tradeCount,
+            reserve_change_percent: maxReserveChange,
+            time_since_first_trade: timeSinceFirstTrade,
+            has_trade_data: true,
+            timestamp: Date.now()
+          });
         }
       }
 
@@ -405,9 +441,8 @@ export class PoolMonitor {
     const baseChange = Math.abs((baseReserve - this.lastBaseReserve) / this.lastBaseReserve);
     const quoteChange = Math.abs((quoteReserve - this.lastQuoteReserve) / this.lastQuoteReserve);
     
-    // Consider it a trade if either reserve changed by more than 0.1%
-    const threshold = 0.001; // 0.1%
-    return baseChange > threshold || quoteChange > threshold;
+    // Ultra-sensitive detection for early entry - detect changes as small as 0.05%
+    return baseChange > this.RESERVE_CHANGE_THRESHOLD || quoteChange > this.RESERVE_CHANGE_THRESHOLD;
   }
 
   private handleError(error: any) {
