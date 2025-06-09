@@ -22,12 +22,16 @@ sio = socketio.AsyncClient(
     reconnection_delay=RECONNECT_DELAY,
     reconnection_delay_max=30,  # max delay between reconnection attempts
     randomization_factor=0.5,  # add some randomization to reconnection delays
-    logger=True,  # enable client-side logging
-    engineio_logger=True,  # enable engine.io logging
+    logger=False,  # disable client-side logging to quiet console
+    engineio_logger=False,  # disable engine.io logging to quiet console
 )
 
 # Global flag for graceful shutdown
 running = True
+
+# Track health messages to only show once per minute
+last_health_log_time = 0
+health_message_count = 0
 
 def signal_handler(sig, frame):
     """Handle graceful shutdown on SIGINT (Ctrl+C)"""
@@ -42,11 +46,6 @@ def log_message(message_type: str, data: dict):
     """Log message to both console and file"""
     timestamp = datetime.now().isoformat()
     log_entry = f"[{timestamp}] {message_type}: {json.dumps(data, indent=2)}\n"
-    
-    # Log to console
-    print(f"\n{Fore.CYAN}=== {message_type} ==={Style.RESET_ALL}")
-    print(f"{Fore.CYAN}Time: {timestamp}{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}Data: {json.dumps(data, indent=2)}{Style.RESET_ALL}")
     
     # Log to file
     with open(MESSAGE_LOG_FILE, 'a') as f:
@@ -64,16 +63,8 @@ async def connect():
     print(f"{Fore.GREEN}✅ Connected to Socket.IO server at {SERVER_URL}{Style.RESET_ALL}")
     print(f"{Fore.GREEN}✅ Client ID: {sio.sid}{Style.RESET_ALL}")
     print(f"{Fore.GREEN}✅ Transport: {sio.transport()}{Style.RESET_ALL}")
-    
-    # Subscribe to all events for debugging
-    @sio.on('*')
-    async def catch_all(event, data):
-        print(f"{Fore.YELLOW}Received event '{event}' with data: {data}{Style.RESET_ALL}")
-        log_message("EVENT", {
-            "event": event,
-            "data": data,
-            "client_id": sio.sid
-        })
+    print(f"{Fore.CYAN}🎧 Listening for events: health, new_pool, pool_update, pool_ready{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}⏰ Health updates will be shown once per minute...{Style.RESET_ALL}")
 
 @sio.event
 async def disconnect():
@@ -119,38 +110,81 @@ async def on_new_pool(data):
             "client_id": sio.sid
         })
 
-@sio.on('health')
-async def on_health(data):
-    """Handle health check events"""
-    print(f"{Fore.GREEN}🏥 HEALTH MESSAGE RECEIVED!{Style.RESET_ALL}")
+@sio.on('pool_update')
+async def on_pool_update(data):
+    """Handle pool update events"""
+    log_message("POOL_UPDATE", {
+        **data,
+        "client_id": sio.sid,
+        "received_at": datetime.now().isoformat()
+    })
+    
     try:
         timestamp = datetime.fromisoformat(data.get('timestamp', '').replace('Z', '+00:00'))
         formatted_time = timestamp.strftime('%Y-%m-%d %H:%M:%S')
-    except Exception:
-        formatted_time = data.get('timestamp', 'Invalid timestamp')
+        
+        print(f"\n{Fore.YELLOW}[{formatted_time}] Pool Update:{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}Pool ID: {data.get('pool_id', 'N/A')}{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}Current Liquidity: {data.get('current_liquidity', 'N/A')}{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}Price Change: {data.get('price_change', 'N/A')}{Style.RESET_ALL}")
+        
+    except Exception as e:
+        print(f"{Fore.RED}Error processing pool update message: {str(e)}{Style.RESET_ALL}")
 
-    uptime = data.get('uptime', 0)
-    hours = int(uptime) // 3600
-    minutes = (int(uptime) % 3600) // 60
-    seconds = int(uptime) % 60
-    
-    status_color = Fore.GREEN if sio.connected else Fore.RED
-    status_icon = "✅" if sio.connected else "❌"
-    
-    # Log health check
-    log_message("HEALTH", {
-        "timestamp": formatted_time,
-        "uptime": f"{hours}h {minutes}m {seconds}s",
-        "connected": sio.connected,
-        "new_pools": NEW_POOL_COUNT
+@sio.on('pool_ready')
+async def on_pool_ready(data):
+    """Handle pool ready events"""
+    log_message("POOL_READY", {
+        **data,
+        "client_id": sio.sid,
+        "received_at": datetime.now().isoformat()
     })
     
-    print(
-        f"{status_color}[{formatted_time}] {status_icon} "
-        f"Connected: {sio.connected} – "
-        f"Uptime: {hours}h {minutes}m {seconds}s – "
-        f"New pools: {NEW_POOL_COUNT}{Style.RESET_ALL}"
-    )
+    try:
+        timestamp = datetime.fromisoformat(data.get('timestamp', '').replace('Z', '+00:00'))
+        formatted_time = timestamp.strftime('%Y-%m-%d %H:%M:%S')
+        
+        print(f"\n{Fore.GREEN}[{formatted_time}] Pool Ready:{Style.RESET_ALL}")
+        print(f"{Fore.GREEN}Pool ID: {data.get('pool_id', 'N/A')}{Style.RESET_ALL}")
+        print(f"{Fore.GREEN}Initial Liquidity: {data.get('initial_liquidity', 'N/A')}{Style.RESET_ALL}")
+        
+    except Exception as e:
+        print(f"{Fore.RED}Error processing pool ready message: {str(e)}{Style.RESET_ALL}")
+
+@sio.on('health')
+async def on_health(data):
+    """Handle health check events - only show once per minute"""
+    global last_health_log_time, health_message_count
+    health_message_count += 1
+    
+    # Only log health messages once per minute
+    current_time = datetime.now()
+    if last_health_log_time == 0 or (current_time - last_health_log_time).seconds >= 60:
+        uptime = data.get('uptime', 0)
+        hours = int(uptime) // 3600
+        minutes = (int(uptime) % 3600) // 60
+        
+        print(f"\n{Fore.GREEN}🏥 HEALTH CHECK - {current_time.strftime('%H:%M:%S')}{Style.RESET_ALL}")
+        print(f"{Fore.GREEN}   ⏱️  Server uptime: {hours}h {minutes}m{Style.RESET_ALL}")
+        #print(f"{Fore.GREEN}   📨 Messages since last check: {data.get('messages_since_last_check', 0)}{Style.RESET_ALL}")
+        #print(f"{Fore.GREEN}   📊 Messages per minute: {data.get('messages_per_minute', 0)}{Style.RESET_ALL}")
+        #print(f"{Fore.GREEN}   👥 Active clients: {data.get('active_clients', 0)}{Style.RESET_ALL}")
+        print(f"{Fore.GREEN}   💓 Health messages received: {health_message_count}{Style.RESET_ALL}")
+        print(f"{Fore.GREEN}   🆕 New pools detected: {NEW_POOL_COUNT}{Style.RESET_ALL}")
+        
+        last_health_log_time = current_time
+    
+    # Always log to file for debugging
+    log_message("HEALTH", {
+        "timestamp": data.get('timestamp', ''),
+        "uptime": data.get('uptime', 0),
+        "messages_since_last_check": data.get('messages_since_last_check', 0),
+        "messages_per_minute": data.get('messages_per_minute', 0),
+        "active_clients": data.get('active_clients', 0),
+        "health_message_count": health_message_count,
+        "new_pools": NEW_POOL_COUNT,
+        "client_id": sio.sid
+    })
 
 async def connect_to_server():
     """Main connection loop with automatic reconnection"""
@@ -173,13 +207,9 @@ async def connect_to_server():
 if __name__ == "__main__":
     try:
         print(f"{Fore.BLUE}Starting Raydium Pool Listener...{Style.RESET_ALL}")
-        # print(f"{Fore.BLUE}Press Ctrl+C to stop{Style.RESET_ALL}")
-        # print(f"{Fore.BLUE}Messages will be logged to: {MESSAGE_LOG_FILE}{Style.RESET_ALL}")
         asyncio.run(connect_to_server())
     except KeyboardInterrupt:
-        # print(f"\n{Fore.YELLOW}Listener stopped by user{Style.RESET_ALL}")
         pass
     finally:
         if sio.connected:
-            asyncio.run(sio.disconnect())
-        # print(f"{Fore.GREEN}Cleanup complete. Goodbye!{Style.RESET_ALL}") 
+            asyncio.run(sio.disconnect()) 

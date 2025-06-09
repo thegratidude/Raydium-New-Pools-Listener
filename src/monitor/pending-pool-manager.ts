@@ -43,6 +43,9 @@ export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
     try {
       this.logger.log('[PendingPoolManager] Initializing...');
       this.isInitialized = true;
+      
+      // Start monitoring for any pools that are already in indexed state
+      this.startMonitoringForExistingIndexedPools();
     } catch (error) {
       this.logger.error('[PendingPoolManager] Failed to initialize:', error instanceof Error ? error.message : 'Unknown error');
       throw error;
@@ -125,6 +128,8 @@ export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
           if (timeSinceCreation >= 10000) { // 10 seconds
             this.logger.log(`[PendingPoolManager] Pool ${pool_id} moved to indexed state`);
             pool.state = 'indexed';
+            // Start monitoring for first swaps when pool becomes indexed
+            this.startMonitoringForFirstSwaps(pool);
           }
           break;
 
@@ -143,6 +148,29 @@ export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
     // Log status if we have any pending or indexed pools
     if (pendingCount > 0 || indexedCount > 0) {
       this.logger.log(`[PendingPoolManager] Status: ${pendingCount} pending, ${indexedCount} indexed pools`);
+    }
+  }
+
+  private startMonitoringForFirstSwaps(pool: PendingPool) {
+    if (!this.poolMonitorManager) {
+      this.logger.error(`[PendingPoolManager] PoolMonitorManager not available, cannot start monitoring for pool ${pool.pool_id}`);
+      return;
+    }
+
+    try {
+      this.logger.log(`[PendingPoolManager] 🎧 Starting swap monitoring for indexed pool: ${pool.token_a.symbol}/${pool.token_b.symbol} (${pool.pool_id})`);
+      
+      // Add the pool to the PoolMonitorManager to start listening for first swaps
+      this.poolMonitorManager.addPool({
+        pool_id: pool.pool_id,
+        token_a: pool.token_a,
+        token_b: pool.token_b
+      }).catch(error => {
+        this.logger.error(`[PendingPoolManager] Failed to start monitoring for pool ${pool.pool_id}:`, error instanceof Error ? error.message : 'Unknown error');
+      });
+      
+    } catch (error) {
+      this.logger.error(`[PendingPoolManager] Error starting swap monitoring for pool ${pool.pool_id}:`, error instanceof Error ? error.message : 'Unknown error');
     }
   }
 
@@ -223,5 +251,22 @@ export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
 
   public removePool(pool_id: string) {
     this.pendingPools.delete(pool_id);
+  }
+
+  private startMonitoringForExistingIndexedPools() {
+    if (!this.poolMonitorManager) {
+      this.logger.warn('[PendingPoolManager] PoolMonitorManager not available, skipping existing indexed pools');
+      return;
+    }
+
+    const indexedPools = Array.from(this.pendingPools.values()).filter(pool => pool.state === 'indexed');
+    
+    if (indexedPools.length > 0) {
+      this.logger.log(`[PendingPoolManager] 🎧 Starting swap monitoring for ${indexedPools.length} existing indexed pools`);
+      
+      indexedPools.forEach(pool => {
+        this.startMonitoringForFirstSwaps(pool);
+      });
+    }
   }
 } 
