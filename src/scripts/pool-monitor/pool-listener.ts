@@ -91,23 +91,18 @@ class PoolListener {
 
   private async startPoolMonitor(poolId: string, poolState: any) {
     const monitor = new PoolMonitor({
-      connection: this.connection,
-      config: {
-        poolAddress: new PublicKey(poolId),
-        updateInterval: 1000,
-        tradeWindow: 3600,
-        priceAlertThreshold: 5,
-        liquidityAlertThreshold: 10,
-        volumeAlertThreshold: 1000
-      },
-      onPriceUpdate: (price: PriceState) => {
+      poolId: new PublicKey(poolId),
+      tokenA: { symbol: 'TOKEN_A', mint: poolState.baseMint.toString(), decimals: 9 },
+      tokenB: { symbol: 'TOKEN_B', mint: poolState.quoteMint.toString(), decimals: 6 },
+      httpUrl: process.env.HTTP_URL || 'https://api.mainnet-beta.solana.com',
+      wssUrl: process.env.WSS_URL || 'wss://api.mainnet-beta.solana.com',
+      onUpdate: (update: any) => {
         // Only log significant price changes
-        if (Math.abs(price.priceChangePercent) >= 1) {
+        if (Math.abs(update.price_change_percent || 0) >= 1) {
           console.log(`\n📊 Pool ${poolId}`);
-          console.log(`Price Change: ${price.priceChangePercent.toFixed(2)}%`);
-          console.log(`Initial Ratio: ${price.initialRatio.toFixed(8)}`);
-          console.log(`Current Ratio: ${price.currentRatio.toFixed(8)}`);
-          console.log(`Last Update: ${price.lastUpdate.toLocaleString()}`);
+          console.log(`Price Change: ${(update.price_change_percent || 0).toFixed(2)}%`);
+          console.log(`Current Price: $${update.price?.toFixed(8) || 'N/A'}`);
+          console.log(`Last Update: ${new Date().toLocaleString()}`);
         }
       }
     });

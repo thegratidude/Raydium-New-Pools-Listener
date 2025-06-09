@@ -87,48 +87,19 @@ class PoolMonitor {
       return;
     }
 
-    const config: MonitorConfig = {
-      poolAddress: new PublicKey(pool.poolAddress),
-      updateInterval: 2000,  // 2 seconds
-      tradeWindow: 60,      // 1 minute
-      priceAlertThreshold: 2,    // 2% price change
-      liquidityAlertThreshold: 5, // 5% liquidity change
-      volumeAlertThreshold: 10000 // $10k volume spike
-    };
-
     const realTimeMonitor = new RealTimeMonitor({
-      connection: this.connection,
-      config,
-      onReserveUpdate: (reserves) => {
+      poolId: new PublicKey(pool.poolAddress),
+      tokenA: { symbol: pool.tokenA, mint: pool.tokenA, decimals: 9 },
+      tokenB: { symbol: pool.tokenB, mint: pool.tokenB, decimals: 6 },
+      httpUrl: process.env.HTTP_URL || 'https://api.mainnet-beta.solana.com',
+      wssUrl: process.env.WSS_URL || 'wss://api.mainnet-beta.solana.com',
+      onUpdate: (update: any) => {
         console.log(
           `📊 ${pool.tokenA}/${pool.tokenB} | ` +
-          `Base: ${this.formatChange(reserves.tokenA.amount, pool.lastAttempt)} | ` +
-          `Vol: ${this.formatChange(reserves.totalLiquidity, pool.lastAttempt)} | ` +
-          `Slippage(1${pool.tokenA}): ${((1 / reserves.tokenA.amount) * 100).toFixed(3)}% | ` +
-          `TVL: $${reserves.totalLiquidity.toLocaleString(undefined, {maximumFractionDigits: 0})}`
+          `Price: $${update.price?.toFixed(8) || 'N/A'} | ` +
+          `TVL: $${update.tvl?.toLocaleString() || 'N/A'} | ` +
+          `Volume: $${update.volume?.toLocaleString() || 'N/A'}`
         );
-      },
-      onTradeUpdate: (trades) => {
-        const latestTrade = trades.trades[0];
-        if (latestTrade) {
-          const tradeEmoji = latestTrade.type === 'buy' ? '🟢' : '🔴';
-          const tradeType = latestTrade.type === 'buy' ? 'BUY' : 'SELL';
-          console.log(
-            `💱 ${tradeEmoji} ${tradeType} | ` +
-            `${latestTrade.tokenIn.amount.toLocaleString(undefined, {maximumFractionDigits: 2})} ${latestTrade.tokenIn.symbol} → ` +
-            `${latestTrade.tokenOut.amount.toLocaleString(undefined, {maximumFractionDigits: 4})} ${latestTrade.tokenOut.symbol} | ` +
-            `Impact: ${latestTrade.priceImpact.toFixed(3)}%`
-          );
-        }
-        console.log(
-          `🔄 Swaps: ${trades.tradeCount} | ` +
-          `Vol: $${trades.volume.toLocaleString(undefined, {maximumFractionDigits: 0})} | ` +
-          `Avg Impact: ${trades.averagePriceImpact.toFixed(3)}%`
-        );
-      },
-      onAlert: (alert) => {
-        const severityEmoji = alert.severity === 'critical' ? '🚨' : alert.severity === 'warning' ? '⚠️' : 'ℹ️';
-        console.log(`${severityEmoji} ${alert.type}: ${alert.message}`);
       }
     });
 

@@ -17,12 +17,23 @@ class StatusReportingTest {
   constructor() {
     this.connection = new Connection(process.env.HTTP_URL || 'https://api.mainnet-beta.solana.com');
     this.socketService = new SocketService();
-    this.pendingPoolManager = new PendingPoolManager();
+    
+    // Create pool monitor manager first
     this.poolMonitorManager = new PoolMonitorManager(
       this.connection,
       this.socketService,
-      this.pendingPoolManager
+      null // Will be set after pending pool manager is created
     );
+    
+    // Create pending pool manager with reference to pool monitor manager
+    this.pendingPoolManager = new PendingPoolManager(
+      this.connection,
+      () => {}, // Empty callback for testing
+      this.poolMonitorManager
+    );
+    
+    // Set the pending pool manager in the pool monitor manager
+    this.poolMonitorManager.setPendingPoolManager(this.pendingPoolManager);
   }
 
   async run() {
