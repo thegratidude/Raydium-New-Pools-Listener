@@ -262,23 +262,35 @@ export class PoolMonitor {
   }
 
   async start() {
-    this.logger.log(`Started monitoring for pool: ${this.tokenA.symbol}/${this.tokenB.symbol} (${this.poolId.toBase58()})`);
+    this.logger.log(`[PoolMonitor] 🚀 STARTING monitor for pool: ${this.tokenA.symbol}/${this.tokenB.symbol} (${this.poolId.toBase58()})`);
     
     // Initial state fetch
+    this.logger.log(`[PoolMonitor] 🔄 Initial API call for ${this.poolId.toBase58()}`);
     await this.processPoolUpdate();
 
     // Start polling every 1 second
+    this.logger.log(`[PoolMonitor] ⏰ Setting up 1-second polling interval for ${this.poolId.toBase58()}`);
     this.intervalId = setInterval(async () => {
-      await this.processPoolUpdate();
+      try {
+        await this.processPoolUpdate();
+      } catch (error) {
+        this.logger.error(`[PoolMonitor] Error in polling interval for ${this.poolId.toBase58()}:`, error instanceof Error ? error.message : 'Unknown error');
+      }
     }, this.updateInterval);
+    
+    this.logger.log(`[PoolMonitor] ✅ Polling interval started for ${this.poolId.toBase58()} - interval ID: ${this.intervalId}`);
   }
 
   stop() {
+    this.logger.log(`[PoolMonitor] 🛑 STOPPING monitor for pool: ${this.poolId.toBase58()}`);
     if (this.intervalId) {
       clearInterval(this.intervalId);
       this.intervalId = null;
+      this.logger.log(`[PoolMonitor] ✅ Polling interval cleared for ${this.poolId.toBase58()}`);
+    } else {
+      this.logger.log(`[PoolMonitor] ⚠️ No interval to clear for ${this.poolId.toBase58()}`);
     }
-    this.logger.log(`Stopped monitoring for pool: ${this.poolId.toBase58()}`);
+    this.logger.log(`[PoolMonitor] 🛑 Stopped monitoring for pool: ${this.poolId.toBase58()}`);
   }
 
   private async processPoolUpdate() {
@@ -293,25 +305,27 @@ export class PoolMonitor {
         this.lastPollLogTime = now;
       }
       
-      // Log API call attempt
-      this.logger.debug(`[PoolMonitor] 🔄 Polling Raydium API for pool ${this.poolId.toBase58()} (${this.tokenA.symbol}/${this.tokenB.symbol})`);
+      // Log API call attempt with instance identifier
+      this.logger.log(`[PoolMonitor] 🔄 API CALL for ${this.tokenA.symbol}/${this.tokenB.symbol} (${this.poolId.toBase58().substring(0, 8)}...) - Poll #${this.pollCount}`);
       
       // Use Raydium API for reliable pool data (like the old monitor.ts)
       const api = new Api({ cluster: 'mainnet', timeout: 30000 });
+      this.logger.log(`[PoolMonitor] 📡 Calling Raydium API for pool ${this.poolId.toBase58()}`);
+      
       const poolInfo = await api.fetchPoolById({ ids: this.poolId.toBase58() });
       
-      // Log API response
-      this.logger.debug(`[PoolMonitor] 📡 API Response for ${this.poolId.toBase58()}: ${JSON.stringify(poolInfo, null, 2)}`);
+      // Log API response with clear formatting
+      this.logger.log(`[PoolMonitor] 📡 API RESPONSE for ${this.poolId.toBase58().substring(0, 8)}...: ${JSON.stringify(poolInfo, null, 2)}`);
       
       if (!Array.isArray(poolInfo) || poolInfo.length === 0 || !poolInfo[0]) {
         // Pool not found or not yet indexed - this is normal for new pools
-        this.logger.debug(`[PoolMonitor] Pool ${this.poolId.toBase58()} not yet indexed by Raydium API`);
+        this.logger.log(`[PoolMonitor] ❌ Pool ${this.poolId.toBase58().substring(0, 8)}... not yet indexed by Raydium API`);
         return;
       }
 
       const pool = poolInfo[0];
       if (!pool.mintA || !pool.mintB) {
-        this.logger.debug(`[PoolMonitor] Pool ${this.poolId.toBase58()} missing mint data`);
+        this.logger.log(`[PoolMonitor] ❌ Pool ${this.poolId.toBase58().substring(0, 8)}... missing mint data`);
         return;
       }
 
@@ -319,11 +333,11 @@ export class PoolMonitor {
       const quoteReserve = pool.mintAmountB || 0;
       
       // Log raw reserve data
-      this.logger.debug(`[PoolMonitor] 📊 Raw reserves for ${this.poolId.toBase58()}: ${baseReserve} ${this.tokenA.symbol} / ${quoteReserve} ${this.tokenB.symbol}`);
+      this.logger.log(`[PoolMonitor] 📊 RESERVES for ${this.poolId.toBase58().substring(0, 8)}...: ${baseReserve} ${this.tokenA.symbol} / ${quoteReserve} ${this.tokenB.symbol}`);
       
       // Check if we have valid reserves
       if (baseReserve <= 0 || quoteReserve <= 0) {
-        this.logger.debug(`[PoolMonitor] Pool ${this.poolId.toBase58()} has invalid reserves: ${baseReserve} ${this.tokenA.symbol} / ${quoteReserve} ${this.tokenB.symbol}`);
+        this.logger.log(`[PoolMonitor] ❌ Pool ${this.poolId.toBase58().substring(0, 8)}... has invalid reserves: ${baseReserve} ${this.tokenA.symbol} / ${quoteReserve} ${this.tokenB.symbol}`);
         return;
       }
 
@@ -337,19 +351,19 @@ export class PoolMonitor {
       if (this.lastBaseReserve !== null && this.lastQuoteReserve !== null) {
         const baseChange = Math.abs((baseReserve - this.lastBaseReserve) / this.lastBaseReserve);
         const quoteChange = Math.abs((quoteReserve - this.lastQuoteReserve) / this.lastQuoteReserve);
-        this.logger.debug(`[PoolMonitor] 🔍 Reserve changes: ${(baseChange * 100).toFixed(4)}% ${this.tokenA.symbol} / ${(quoteChange * 100).toFixed(4)}% ${this.tokenB.symbol} (threshold: ${(this.RESERVE_CHANGE_THRESHOLD * 100).toFixed(3)}%)`);
+        this.logger.log(`[PoolMonitor] 🔍 CHANGES for ${this.poolId.toBase58().substring(0, 8)}...: ${(baseChange * 100).toFixed(4)}% ${this.tokenA.symbol} / ${(quoteChange * 100).toFixed(4)}% ${this.tokenB.symbol} (threshold: ${(this.RESERVE_CHANGE_THRESHOLD * 100).toFixed(3)}%)`);
       }
 
       // Detect reserve changes (this is the key insight!)
       const hasReserveChange = this.detectReserveChange(baseReserve, quoteReserve);
       
       if (hasReserveChange) {
-        this.logger.log(`🚨 RESERVE CHANGE DETECTED for ${this.poolId.toBase58()}!`);
+        this.logger.log(`🚨 RESERVE CHANGE DETECTED for ${this.poolId.toBase58().substring(0, 8)}...!`);
         this.tradeCount++;
         
         if (!this.firstTradeTime) {
           this.firstTradeTime = Date.now();
-          this.logger.log(`🔥 FIRST TRADE DETECTED for pool ${this.poolId.toBase58()} - IMMEDIATE NOTIFICATION!`);
+          this.logger.log(`🔥 FIRST TRADE DETECTED for pool ${this.poolId.toBase58().substring(0, 8)}... - IMMEDIATE NOTIFICATION!`);
           this.logger.log(`  Initial reserves: ${baseReserve} ${this.tokenA.symbol} / ${quoteReserve} ${this.tokenB.symbol}`);
           
           // IMMEDIATE NOTIFICATION for early entry - no waiting!
@@ -404,7 +418,7 @@ export class PoolMonitor {
         if (this.tradeCount > 1) {
           const timeSinceFirstTrade = Date.now() - (this.firstTradeTime || 0);
           
-          this.logger.log(`🎯 Additional trade #${this.tradeCount} for pool ${this.poolId.toBase58()} - ${maxReserveChange.toFixed(2)}% reserve change`);
+          this.logger.log(`🎯 Additional trade #${this.tradeCount} for pool ${this.poolId.toBase58().substring(0, 8)}... - ${maxReserveChange.toFixed(2)}% reserve change`);
           
           this.onUpdate({
             pool_id: this.poolId.toString(),
@@ -444,7 +458,7 @@ export class PoolMonitor {
         }
       } else {
         // Log when no change is detected
-        this.logger.debug(`[PoolMonitor] No reserve change detected for ${this.poolId.toBase58()}`);
+        this.logger.log(`[PoolMonitor] ✅ No reserve change for ${this.poolId.toBase58().substring(0, 8)}...`);
       }
 
       // Update last reserves for next comparison
@@ -454,13 +468,14 @@ export class PoolMonitor {
       // Set initial ratio if not set
       if (this.initialReserveRatio === null) {
         this.initialReserveRatio = quoteReserve / baseReserve;
-        this.logger.debug(`[PoolMonitor] Set initial reserve ratio for ${this.poolId.toBase58()}: ${this.initialReserveRatio}`);
+        this.logger.log(`[PoolMonitor] 📈 Set initial ratio for ${this.poolId.toBase58().substring(0, 8)}...: ${this.initialReserveRatio}`);
       }
 
       // Reset retry count on successful update
       this.retryCount = 0;
 
     } catch (error: any) {
+      this.logger.error(`[PoolMonitor] ❌ ERROR for ${this.poolId.toBase58().substring(0, 8)}...:`, error?.message || error);
       this.handleError(error);
     }
   }
