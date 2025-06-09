@@ -19,11 +19,9 @@ export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PendingPoolManager.name);
   private pendingPools: Map<string, PendingPool> = new Map();
   private checkInterval: NodeJS.Timeout | null = null;
-  private reminderInterval: NodeJS.Timeout | null = null;
   private readonly MAX_WAIT_TIME = 5 * 60 * 1000; // 5 minutes
   private readonly MAX_RETRIES = 3;
   private readonly CHECK_INTERVAL = 10000; // 10 seconds
-  private readonly REMINDER_INTERVAL = 60000; // 1 minute
   private readonly TRADE_WINDOW = 30000; // 30 seconds to observe trades
   private onPoolReady: (pool: PendingPool) => void;
   private readonly poolMonitorManager?: PoolMonitorManager;
@@ -136,7 +134,6 @@ export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
           pendingCount++;
           // Move to indexed state after initial delay
           if (timeSinceCreation >= 10000) { // 10 seconds
-            this.logger.log(`Pool ${pool_id} moved to indexed state`);
             pool.state = 'indexed';
             // Start monitoring for first swaps when pool becomes indexed
             this.startMonitoringForFirstSwaps(pool);
@@ -155,10 +152,38 @@ export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    // Only log status if we have pools and it's been a while since last status update
-    if ((pendingCount > 0 || indexedCount > 0) && this.shouldLogStatus()) {
-      this.logger.log(`Status: ${pendingCount} pending, ${indexedCount} indexed pools`);
+    // Log consolidated status every 30 seconds
+    if (this.shouldLogStatus()) {
+      this.logStatusUpdate(pendingCount, indexedCount);
     }
+  }
+
+  private logStatusUpdate(pendingCount: number, indexedCount: number) {
+    const now = Date.now();
+    
+    // Build status message
+    let statusMessage = `Status: ${pendingCount} pending, ${indexedCount} indexed pools`;
+    
+    // Add individual pool details if there are any pools
+    if (pendingCount > 0 || indexedCount > 0) {
+      const pendingPools = Array.from(this.pendingPools.values())
+        .filter(pool => pool.state === 'pending' || pool.state === 'indexed');
+      
+      if (pendingPools.length > 0) {
+        statusMessage += '\n  Pools:';
+        pendingPools.forEach(pool => {
+          const waitTime = Math.floor((now - pool.last_update_time) / 1000);
+          const status = pool.state === 'pending' ? '⏳ Pending' : '📊 Indexed';
+          const poolIdShort = pool.pool_id.slice(0, 6);
+          const tradeInfo = pool.trade_count > 0 
+            ? ` (${pool.trade_count} trades, ${pool.reserve_changes.toFixed(2)}% reserve change)`
+            : '';
+          statusMessage += `\n    • ${poolIdShort}...: ${status}${tradeInfo} (${waitTime}s)`;
+        });
+      }
+    }
+    
+    this.logger.log(statusMessage);
   }
 
   private shouldLogStatus(): boolean {
@@ -194,30 +219,12 @@ export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
   }
 
   private startReminderSystem() {
-    this.reminderInterval = setInterval(() => {
-      const now = Date.now();
-      const pendingPools = Array.from(this.pendingPools.values())
-        .filter(pool => pool.state === 'pending' || pool.state === 'indexed');
-
-      if (pendingPools.length > 0) {
-        this.logger.log('\n[PendingPoolManager] 🔄 Waiting for trades:');
-        pendingPools.forEach(pool => {
-          const waitTime = Math.floor((now - pool.last_update_time) / 1000);
-          const status = pool.state === 'pending' ? '⏳ Pending' : '📊 Indexed';
-          const tradeInfo = pool.trade_count > 0 
-            ? ` (${pool.trade_count} trades, ${pool.reserve_changes.toFixed(2)}% reserve change)`
-            : '';
-          this.logger.log(`  • ${pool.token_a.symbol}/${pool.token_b.symbol} (${pool.pool_id.slice(0, 8)}...): ${status}${tradeInfo} (${waitTime}s)`);
-        });
-        this.logger.log(''); // Empty line for readability
-      }
-    }, this.REMINDER_INTERVAL);
+    // Removed - consolidated into 30-second status updates
   }
 
   start() {
     if (!this.checkInterval) {
       this.checkInterval = setInterval(() => this.checkPools(), this.CHECK_INTERVAL);
-      this.startReminderSystem();
       this.logger.log('[PendingPoolManager] Started pool monitoring system');
     }
   }
@@ -226,10 +233,6 @@ export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
     if (this.checkInterval) {
       clearInterval(this.checkInterval);
       this.checkInterval = null;
-    }
-    if (this.reminderInterval) {
-      clearInterval(this.reminderInterval);
-      this.reminderInterval = null;
     }
     this.logger.log('[PendingPoolManager] Stopped pool monitoring system');
   }
