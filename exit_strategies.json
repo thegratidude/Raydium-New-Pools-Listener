@@ -1,0 +1,16 @@
+{
+    "strategies": {
+        "profit_take_10": {
+            "name": "10% Profit Take",
+            "description": "Sell 100% of position if profit exceeds 10% for two consecutive updates",
+            "type": "profit_based",
+            "parameters": {
+                "profit_threshold": 0.10,
+                "consecutive_updates": 2,
+                "sell_percentage": 1.0
+            },
+            "enabled": true
+        }
+    },
+    "active_strategies": ["profit_take_10"]
+} 

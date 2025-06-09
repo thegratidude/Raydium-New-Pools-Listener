@@ -1,49 +1,177 @@
-import { Connection, PublicKey, AccountInfo } from '@solana/web3.js';
-import { Logger } from '@nestjs/common';
-import { PoolMonitorService } from './pool-monitor.service';
+import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
+import { Connection } from '@solana/web3.js';
+import { PoolMonitorManager } from './pool-monitor-manager';
+import { TokenInfo } from '../types/token';
 
 export interface PendingPool {
-  poolId: string;
-  tokenA: string;
-  tokenB: string;
-  state: 'pending' | 'indexed' | 'failed';
-  attempts: number;
-  lastChecked: number;
-  error?: string;
+  pool_id: string;
+  token_a: TokenInfo;
+  token_b: TokenInfo;
+  state: 'pending' | 'ready' | 'indexed' | 'failed';
+  last_update_time: number;
+  last_trade_time?: number;
+  trade_count: number;
+  reserve_changes: number;
 }
 
-export class PendingPoolManager {
+@Injectable()
+export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PendingPoolManager.name);
   private pendingPools: Map<string, PendingPool> = new Map();
   private checkInterval: NodeJS.Timeout | null = null;
-  private readonly CHECK_INTERVAL = 1000; // 1 second
-  private readonly MAX_ATTEMPTS = 1800; // 30 minutes
-  private readonly MAX_ATTEMPTS_READY = 300; // 5 minutes for ready pools
+  private reminderInterval: NodeJS.Timeout | null = null;
+  private readonly MAX_WAIT_TIME = 5 * 60 * 1000; // 5 minutes
+  private readonly MAX_RETRIES = 3;
+  private readonly CHECK_INTERVAL = 10000; // 10 seconds
+  private readonly REMINDER_INTERVAL = 60000; // 1 minute
+  private readonly TRADE_WINDOW = 30000; // 30 seconds to observe trades
+  private onPoolReady: (pool: PendingPool) => void;
+  private readonly poolMonitorManager?: PoolMonitorManager;
+  private isInitialized = false;
 
   constructor(
     private readonly connection: Connection,
-    private readonly poolMonitorService: PoolMonitorService
+    onPoolReady: (pool: PendingPool) => void,
+    poolMonitorManager?: PoolMonitorManager
   ) {
+    this.onPoolReady = onPoolReady;
+    this.poolMonitorManager = poolMonitorManager;
     this.logger.log('PendingPoolManager initialized');
   }
 
-  addPool(poolId: string, tokenA: string, tokenB: string) {
-    this.logger.log(`Adding pool ${poolId} to pending list`);
-    this.pendingPools.set(poolId, {
-      poolId,
-      tokenA,
-      tokenB,
-      state: 'pending',
-      attempts: 0,
-      lastChecked: Date.now()
-    });
-    this.start();
+  async onModuleInit() {
+    try {
+      this.logger.log('[PendingPoolManager] Initializing...');
+      this.isInitialized = true;
+    } catch (error) {
+      this.logger.error('[PendingPoolManager] Failed to initialize:', error instanceof Error ? error.message : 'Unknown error');
+      throw error;
+    }
   }
 
-  private start() {
+  async onModuleDestroy() {
+    this.logger.log('[PendingPoolManager] Shutting down...');
+    this.pendingPools.clear();
+    this.isInitialized = false;
+  }
+
+  addPool(pool_id: string, token_a: TokenInfo, token_b: TokenInfo) {
+    if (!this.isInitialized) {
+      throw new Error('PendingPoolManager not initialized');
+    }
+
+    if (this.pendingPools.has(pool_id)) {
+      this.logger.log(`[PendingPoolManager] Pool ${pool_id} already exists in pending state`);
+      return;
+    }
+
+    this.logger.log(`[PendingPoolManager] Adding new pool to pending state: ${token_a.symbol}/${token_b.symbol} (${pool_id})`);
+    
+    this.pendingPools.set(pool_id, {
+      pool_id,
+      token_a,
+      token_b,
+      state: 'pending',
+      last_update_time: Date.now(),
+      trade_count: 0,
+      reserve_changes: 0
+    });
+  }
+
+  notifyTradeData(pool_id: string, update: { trade_count: number; reserve_change_percent: number; time_since_first_trade: number }) {
+    if (!this.isInitialized) {
+      throw new Error('PendingPoolManager not initialized');
+    }
+
+    const pool = this.pendingPools.get(pool_id);
+    if (!pool) {
+      this.logger.log(`[PendingPoolManager] Received trade data for unknown pool: ${pool_id}`);
+      return;
+    }
+
+    if (pool.state === 'indexed') {
+      pool.trade_count = update.trade_count;
+      pool.reserve_changes = update.reserve_change_percent;
+      
+      if (!pool.last_trade_time) {
+        pool.last_trade_time = Date.now() - update.time_since_first_trade;
+        this.logger.log(`[PendingPoolManager] 🔥 First trade detected for pool ${pool_id}`);
+      }
+
+      // Only mark as ready if we've seen enough trades in the window
+      if (update.trade_count >= 2 && update.time_since_first_trade <= this.TRADE_WINDOW) {
+        this.logger.log(`[PendingPoolManager] 🎯 Pool ${pool_id} is ready! Seen ${update.trade_count} trades with ${update.reserve_change_percent.toFixed(2)}% reserve change`);
+        pool.state = 'ready';
+        this.onPoolReady(pool);
+        this.pendingPools.delete(pool_id);
+      }
+    }
+  }
+
+  private checkPools() {
+    const now = Date.now();
+    let pendingCount = 0;
+    let indexedCount = 0;
+
+    for (const [pool_id, pool] of this.pendingPools.entries()) {
+      const timeSinceCreation = now - pool.last_update_time;
+      const timeSinceLastCheck = now - pool.last_update_time;
+      pool.last_update_time = now;
+
+      switch (pool.state) {
+        case 'pending':
+          pendingCount++;
+          // Move to indexed state after initial delay
+          if (timeSinceCreation >= 10000) { // 10 seconds
+            this.logger.log(`[PendingPoolManager] Pool ${pool_id} moved to indexed state`);
+            pool.state = 'indexed';
+          }
+          break;
+
+        case 'indexed':
+          indexedCount++;
+          // Check if we've waited too long for trade data
+          if (timeSinceCreation >= this.MAX_WAIT_TIME) {
+            this.logger.log(`[PendingPoolManager] Pool ${pool_id} failed to produce trade data after ${this.MAX_WAIT_TIME/1000}s`);
+            pool.state = 'failed';
+            this.pendingPools.delete(pool_id);
+          }
+          break;
+      }
+    }
+
+    // Log status if we have any pending or indexed pools
+    if (pendingCount > 0 || indexedCount > 0) {
+      this.logger.log(`[PendingPoolManager] Status: ${pendingCount} pending, ${indexedCount} indexed pools`);
+    }
+  }
+
+  private startReminderSystem() {
+    this.reminderInterval = setInterval(() => {
+      const now = Date.now();
+      const pendingPools = Array.from(this.pendingPools.values())
+        .filter(pool => pool.state === 'pending' || pool.state === 'indexed');
+
+      if (pendingPools.length > 0) {
+        this.logger.log('\n[PendingPoolManager] 🔄 Waiting for trades:');
+        pendingPools.forEach(pool => {
+          const waitTime = Math.floor((now - pool.last_update_time) / 1000);
+          const status = pool.state === 'pending' ? '⏳ Pending' : '📊 Indexed';
+          const tradeInfo = pool.trade_count > 0 
+            ? ` (${pool.trade_count} trades, ${pool.reserve_changes.toFixed(2)}% reserve change)`
+            : '';
+          this.logger.log(`  • ${pool.token_a.symbol}/${pool.token_b.symbol} (${pool.pool_id.slice(0, 8)}...): ${status}${tradeInfo} (${waitTime}s)`);
+        });
+        this.logger.log(''); // Empty line for readability
+      }
+    }, this.REMINDER_INTERVAL);
+  }
+
+  start() {
     if (!this.checkInterval) {
       this.checkInterval = setInterval(() => this.checkPools(), this.CHECK_INTERVAL);
-      this.logger.log('Started checking pending pools');
+      this.startReminderSystem();
+      this.logger.log('[PendingPoolManager] Started pool monitoring system');
     }
   }
 
@@ -51,55 +179,49 @@ export class PendingPoolManager {
     if (this.checkInterval) {
       clearInterval(this.checkInterval);
       this.checkInterval = null;
-      this.logger.log('Stopped checking pending pools');
     }
+    if (this.reminderInterval) {
+      clearInterval(this.reminderInterval);
+      this.reminderInterval = null;
+    }
+    this.logger.log('[PendingPoolManager] Stopped pool monitoring system');
   }
 
-  private async checkPools() {
-    const now = Date.now();
-    const pending = Array.from(this.pendingPools.values()).filter(p => p.state === 'pending');
-    if (pending.length === 0) {
-      this.stop();
-      return;
+  getPool(pool_id: string): PendingPool | undefined {
+    if (!this.isInitialized) {
+      throw new Error('PendingPoolManager not initialized');
     }
-
-    this.logger.log(`Checking ${pending.length} pending pools...`);
-    
-    // Batch check existence
-    const pubkeys = pending.map(p => new PublicKey(p.poolId));
-    let infos: (AccountInfo<Buffer> | null)[] = [];
-    try {
-      infos = await this.connection.getMultipleAccountsInfo(pubkeys);
-    } catch (e) {
-      this.logger.error('Batch RPC error:', e);
-      return;
-    }
-
-    pending.forEach((pool, i) => {
-      pool.lastChecked = now;
-      pool.attempts++;
-      const info = infos[i];
-      
-      if (info) {
-        // Pool exists on-chain, mark as indexed and notify PoolMonitorService
-        pool.state = 'indexed';
-        this.logger.log(`Pool ${pool.poolId} is now indexed, notifying PoolMonitorService`);
-        this.poolMonitorService.handlePoolReady(pool);
-        this.pendingPools.delete(pool.poolId);
-      } else if (pool.attempts >= this.MAX_ATTEMPTS) {
-        pool.state = 'failed';
-        pool.error = 'Not found after max attempts';
-        this.logger.warn(`Pool ${pool.poolId} failed after ${this.MAX_ATTEMPTS} attempts`);
-        this.pendingPools.delete(pool.poolId);
-      }
-    });
+    return this.pendingPools.get(pool_id);
   }
 
-  getPendingPools() {
+  getAllPools(): PendingPool[] {
+    if (!this.isInitialized) {
+      throw new Error('PendingPoolManager not initialized');
+    }
     return Array.from(this.pendingPools.values());
   }
 
-  public removePool(poolId: string) {
-    this.pendingPools.delete(poolId);
+  setPoolState(pool_id: string, state: 'pending' | 'ready' | 'indexed' | 'failed') {
+    if (!this.isInitialized) {
+      throw new Error('PendingPoolManager not initialized');
+    }
+
+    const pool = this.pendingPools.get(pool_id);
+    if (!pool) {
+      this.logger.log(`[PendingPoolManager] Cannot set state for unknown pool: ${pool_id}`);
+      return;
+    }
+
+    pool.state = state;
+    pool.last_update_time = Date.now();
+
+    if (state === 'ready') {
+      this.onPoolReady(pool);
+      this.pendingPools.delete(pool_id);
+    }
+  }
+
+  public removePool(pool_id: string) {
+    this.pendingPools.delete(pool_id);
   }
 } 

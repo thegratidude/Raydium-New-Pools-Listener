@@ -1,141 +1,216 @@
 import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { Connection, PublicKey } from '@solana/web3.js';
 import { TokenInfo } from '../types/token';
-import { PoolMonitor, PoolUpdate } from './pool-monitor';
+import { PoolMonitor } from './pool-monitor';
 import { SocketService } from '../gateway/socket.service';
-import { PoolBroadcastMessage } from './types';
+import { PendingPoolManager } from './pending-pool-manager';
+import { PoolUpdate, PoolBroadcastMessage, createMarketPressure } from '../types/market';
 
 interface ManagedPool {
-  poolId: string;
-  tokenA: TokenInfo;
-  tokenB: TokenInfo;
-  monitor?: PoolMonitor;
+  pool_id: string;
+  token_a: TokenInfo;
+  token_b: TokenInfo;
+  monitor: PoolMonitor | null;
 }
 
 @Injectable()
 export class PoolMonitorManager implements OnModuleInit, OnModuleDestroy {
-  private readonly logger = new Logger(PoolMonitorManager.name);
   private pools: Map<string, ManagedPool> = new Map();
-  private readonly httpUrl: string;
-  private readonly wssUrl: string;
+  private readonly logger = new Logger(PoolMonitorManager.name);
+  private readonly socketService: SocketService;
+  private pendingPoolManager: PendingPoolManager | null = null;
+  private readonly httpEndpoint: string;
+  private readonly wssEndpoint: string;
+  private isInitialized = false;
 
   constructor(
     private readonly connection: Connection,
-    private readonly socketService: SocketService | undefined,
-    httpEndpoint?: string,
-    wssEndpoint?: string
+    socketService: SocketService,
+    pendingPoolManager: PendingPoolManager | null = null,
+    httpEndpoint: string = process.env.HTTP_URL || 'https://api.mainnet-beta.solana.com',
+    wssEndpoint: string = process.env.WSS_URL || 'wss://api.mainnet-beta.solana.com'
   ) {
-    this.httpUrl = httpEndpoint || 'https://api.mainnet-beta.solana.com';
-    this.wssUrl = wssEndpoint || 'wss://api.mainnet-beta.solana.com';
+    if (!httpEndpoint || !wssEndpoint) {
+      throw new Error('HTTP and WSS endpoints are required');
+    }
+
+    this.socketService = socketService;
+    this.pendingPoolManager = pendingPoolManager;
+    this.httpEndpoint = httpEndpoint;
+    this.wssEndpoint = wssEndpoint;
     this.logger.log('PoolMonitorManager initialized');
   }
 
   async onModuleInit() {
-    this.logger.log('[PoolMonitorManager] Initializing...');
+    try {
+      this.logger.log('[PoolMonitorManager] Initializing...');
+      this.isInitialized = true;
+    } catch (error) {
+      this.logger.error('[PoolMonitorManager] Failed to initialize:', error instanceof Error ? error.message : 'Unknown error');
+      throw error;
+    }
   }
 
   async onModuleDestroy() {
     this.logger.log('[PoolMonitorManager] Shutting down...');
-    // Stop all monitors
-    for (const pool of this.pools.values()) {
-      if (pool.monitor) {
-        // Since we removed the stop method, we'll just set the monitor to undefined
-        pool.monitor = undefined;
-      }
-    }
-  }
-
-  async addPool(poolInfo: { poolId: string; tokenA: TokenInfo; tokenB: TokenInfo }) {
-    if (this.pools.has(poolInfo.poolId)) {
-      this.logger.log(`[PoolMonitorManager] Pool ${poolInfo.poolId} already exists`);
-      return;
-    }
-
-    this.logger.log(`[PoolMonitorManager] Adding pool: ${poolInfo.tokenA.symbol}/${poolInfo.tokenB.symbol} (${poolInfo.poolId})`);
-
-    // Create monitor
-    const monitor = new PoolMonitor({
-      poolId: new PublicKey(poolInfo.poolId),
-      tokenA: poolInfo.tokenA,
-      tokenB: poolInfo.tokenB,
-      httpUrl: this.httpUrl,
-      wssUrl: this.wssUrl,
-      onUpdate: (update: PoolUpdate) => {
-        this.logger.log(`[PoolMonitor] Update for ${update.poolId}:`, {
-          baseReserve: update.baseReserve,
-          quoteReserve: update.quoteReserve,
-          timestamp: new Date(update.timestamp).toISOString()
-        });
-
-        // Broadcast to socket clients if socket service is available
-        if (this.socketService?.isReady()) {
-          const broadcastMessage: PoolBroadcastMessage = {
-            event: 'pool_update',
-            pool_id: update.poolId,
-            timestamp: update.timestamp,
-            data: {
-              pair: `${poolInfo.tokenA.symbol}/${poolInfo.tokenB.symbol}`,
-              price: update.baseReserve / update.quoteReserve, // Simple price calculation
-              price_change: 0, // We don't have historical data for change
-              tvl: update.baseReserve + update.quoteReserve, // Simple TVL calculation
-              volume_24h: 0, // We don't have volume data yet
-              market_pressure: {
-                buy_pressure: 0,
-                sell_pressure: 0,
-                trend: 'neutral',
-                rug_risk: 0
-              },
-              reserves: {
-                base_reserve: update.baseReserve,
-                quote_reserve: update.quoteReserve,
-                base_symbol: poolInfo.tokenA.symbol,
-                quote_symbol: poolInfo.tokenB.symbol
-              },
-              origin_data: {
-                price: update.baseReserve / update.quoteReserve,
-                base_reserve: update.baseReserve,
-                quote_reserve: update.quoteReserve,
-                timestamp: update.timestamp
-              }
-            }
-          };
-          this.socketService.broadcastPoolUpdate(broadcastMessage);
+    try {
+      // Stop all monitors
+      for (const pool of this.pools.values()) {
+        if (pool.monitor) {
+          try {
+            await pool.monitor.stop();
+          } catch (error) {
+            this.logger.error(`Error stopping monitor for pool ${pool.pool_id}:`, error instanceof Error ? error.message : 'Unknown error');
+          }
         }
       }
-    });
-
-    // Store pool info
-    this.pools.set(poolInfo.poolId, {
-      ...poolInfo,
-      monitor
-    });
-
-    // Start monitoring
-    await monitor.start();
+      this.pools.clear();
+      this.isInitialized = false;
+    } catch (error) {
+      this.logger.error('[PoolMonitorManager] Error during shutdown:', error instanceof Error ? error.message : 'Unknown error');
+      throw error;
+    }
   }
 
-  async removePool(poolId: string) {
-    const pool = this.pools.get(poolId);
-    if (!pool) {
-      this.logger.log(`[PoolMonitorManager] Pool ${poolId} not found`);
-      return;
+  async addPool(poolInfo: { pool_id: string; token_a: TokenInfo; token_b: TokenInfo }) {
+    try {
+      if (!this.isInitialized) {
+        throw new Error('PoolMonitorManager not initialized');
+      }
+
+      if (!poolInfo.pool_id || !poolInfo.token_a || !poolInfo.token_b) {
+        throw new Error('Invalid pool information: pool_id, token_a, and token_b are required');
+      }
+
+      if (this.pools.has(poolInfo.pool_id)) {
+        this.logger.log(`[PoolMonitorManager] Pool ${poolInfo.pool_id} already exists`);
+        return;
+      }
+
+      this.logger.log(`[PoolMonitorManager] Adding pool: ${poolInfo.token_a.symbol}/${poolInfo.token_b.symbol} (${poolInfo.pool_id})`);
+
+      // Create monitor
+      const monitor = new PoolMonitor({
+        poolId: new PublicKey(poolInfo.pool_id),
+        tokenA: poolInfo.token_a,
+        tokenB: poolInfo.token_b,
+        httpUrl: this.httpEndpoint,
+        wssUrl: this.wssEndpoint,
+        onUpdate: (update: PoolUpdate) => {
+          this.onUpdate(update);
+        }
+      });
+
+      // Store pool info
+      this.pools.set(poolInfo.pool_id, {
+        pool_id: poolInfo.pool_id,
+        token_a: poolInfo.token_a,
+        token_b: poolInfo.token_b,
+        monitor
+      });
+
+      // Start monitoring
+      try {
+        await monitor.start();
+      } catch (error) {
+        this.logger.error(`Failed to start monitor for pool ${poolInfo.pool_id}:`, error instanceof Error ? error.message : 'Unknown error');
+        this.pools.delete(poolInfo.pool_id);
+        throw error;
+      }
+    } catch (error) {
+      this.logger.error(`Failed to add pool ${poolInfo.pool_id}:`, error instanceof Error ? error.message : 'Unknown error');
+      throw error;
     }
-
-    this.logger.log(`[PoolMonitorManager] Removing pool: ${pool.tokenA.symbol}/${pool.tokenB.symbol} (${poolId})`);
-
-    // Since we removed the stop method, we'll just set the monitor to undefined
-    if (pool.monitor) {
-      pool.monitor = undefined;
-    }
-
-    this.pools.delete(poolId);
   }
 
-  getPool(poolId: string): ManagedPool | undefined {
-    return this.pools.get(poolId);
+  async removePool(pool_id: string) {
+    try {
+      if (!this.isInitialized) {
+        throw new Error('PoolMonitorManager not initialized');
+      }
+
+      if (!pool_id) {
+        throw new Error('Invalid pool_id');
+      }
+
+      const pool = this.pools.get(pool_id);
+      if (!pool) {
+        this.logger.log(`[PoolMonitorManager] Pool ${pool_id} not found`);
+        return;
+      }
+
+      this.logger.log(`[PoolMonitorManager] Removing pool: ${pool.token_a.symbol}/${pool.token_b.symbol} (${pool_id})`);
+
+      if (pool.monitor) {
+        try {
+          await pool.monitor.stop();
+        } catch (error) {
+          this.logger.error(`Error stopping monitor for pool ${pool_id}:`, error instanceof Error ? error.message : 'Unknown error');
+        }
+      }
+
+      this.pools.delete(pool_id);
+    } catch (error) {
+      this.logger.error(`Failed to remove pool ${pool_id}:`, error instanceof Error ? error.message : 'Unknown error');
+      throw error;
+    }
+  }
+
+  getPool(pool_id: string): ManagedPool | undefined {
+    if (!this.isInitialized) {
+      throw new Error('PoolMonitorManager not initialized');
+    }
+    return this.pools.get(pool_id);
   }
 
   getAllPools(): ManagedPool[] {
+    if (!this.isInitialized) {
+      throw new Error('PoolMonitorManager not initialized');
+    }
     return Array.from(this.pools.values());
+  }
+
+  private onUpdate(update: PoolUpdate) {
+    try {
+      if (update.has_trade_data && this.pendingPoolManager) {
+        this.pendingPoolManager.notifyTradeData(update.pool_id, {
+          trade_count: update.trade_count || 0,
+          reserve_change_percent: update.reserve_change_percent || 0,
+          time_since_first_trade: update.time_since_first_trade || 0
+        });
+      }
+
+      // Convert market pressure to the broadcast format
+      const market_pressure = createMarketPressure(update.market_pressure);
+
+      // Broadcast the update
+      const broadcastMessage: PoolBroadcastMessage = {
+        event: 'pool_update',
+        pool_id: update.pool_id,
+        timestamp: Date.now(),
+        data: {
+          price: update.price,
+          tvl: update.tvl,
+          market_pressure,
+          base_token: update.base_token,
+          quote_token: update.quote_token,
+          base_reserve: update.base_reserve,
+          quote_reserve: update.quote_reserve,
+          trade_count: update.trade_count,
+          reserve_change_percent: update.reserve_change_percent
+        }
+      };
+
+      this.socketService.broadcastPoolUpdate(broadcastMessage);
+    } catch (error) {
+      this.logger.error(`Error processing update for pool ${update.pool_id}:`, error instanceof Error ? error.message : 'Unknown error');
+    }
+  }
+
+  setPendingPoolManager(manager: PendingPoolManager) {
+    if (!this.isInitialized) {
+      throw new Error('PoolMonitorManager not initialized');
+    }
+    this.pendingPoolManager = manager;
   }
 } 

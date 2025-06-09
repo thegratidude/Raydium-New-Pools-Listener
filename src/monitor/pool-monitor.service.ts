@@ -1,124 +1,194 @@
-import { Injectable, OnModuleInit, Logger } from '@nestjs/common';
+import { Injectable, OnModuleInit, Logger, OnModuleDestroy } from '@nestjs/common';
 import { Connection, PublicKey } from '@solana/web3.js';
-import { PendingPoolManager, PendingPool } from './pending-pool-manager';
 import { SocketService } from '../gateway/socket.service';
+import { PendingPoolManager, PendingPool } from './pending-pool-manager';
 import { PoolMonitorManager } from './pool-monitor-manager';
-import { MINT_TO_TOKEN, TokenInfo, conciseOnUpdate, MarketPressure } from './types';
+import { MINT_TO_TOKEN, TokenInfo, TokenMap, PoolReadyMessage, isTokenInfo } from './types';
 
 @Injectable()
-export class PoolMonitorService implements OnModuleInit {
+export class PoolMonitorService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PoolMonitorService.name);
   private pendingPoolManager: PendingPoolManager;
+  private poolMonitorManager: PoolMonitorManager;
   private isInitialized = false;
 
   constructor(
     private readonly connection: Connection,
-    private readonly socketService: SocketService,
-    private readonly poolMonitorManager: PoolMonitorManager
+    private readonly socketService: SocketService
   ) {
+    if (!process.env.HTTP_URL || !process.env.WSS_URL) {
+      throw new Error('Required environment variables HTTP_URL and WSS_URL are not set');
+    }
+
     this.logger.log('Initializing PoolMonitorService...');
-    this.pendingPoolManager = new PendingPoolManager(this.connection, this);
-    this.logger.log('✅ PoolMonitorService constructed with SocketService and PendingPoolManager');
+    
+    try {
+      this.poolMonitorManager = new PoolMonitorManager(
+        this.connection,
+        this.socketService,
+        null, // We'll set this after creating PendingPoolManager
+        process.env.HTTP_URL,
+        process.env.WSS_URL
+      );
+
+      this.pendingPoolManager = new PendingPoolManager(
+        this.connection,
+        this.handlePoolReady.bind(this),
+        this.poolMonitorManager
+      );
+
+      this.logger.log('✅ PoolMonitorService constructed with SocketService and PendingPoolManager');
+    } catch (error) {
+      this.logger.error('Failed to initialize PoolMonitorService:', error instanceof Error ? error.message : 'Unknown error');
+      throw error;
+    }
   }
 
   async onModuleInit() {
-    // Wait for SocketService to be ready (up to 10 seconds)
-    let attempts = 0;
-    while (!this.socketService.isReady() && attempts < 10) {
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      attempts++;
-      this.logger.log(`Waiting for Socket.IO server... attempt ${attempts}/10`);
-    }
+    try {
+      // Wait for SocketService to be ready (up to 10 seconds)
+      let attempts = 0;
+      while (!this.socketService.isReady() && attempts < 10) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        attempts++;
+        this.logger.log(`Waiting for Socket.IO server... attempt ${attempts}/10`);
+      }
 
-    if (!this.socketService.isReady()) {
-      this.logger.error('Socket.IO server failed to initialize within 10 seconds');
-      return;
-    }
+      if (!this.socketService.isReady()) {
+        throw new Error('Socket.IO server failed to initialize within 10 seconds');
+      }
 
-    this.isInitialized = true;
-    this.logger.log('PoolMonitorService initialized and ready to monitor new pools');
-    this.logger.log(`Socket service initialized: ${this.socketService.isReady()}`);
+      // Ensure PoolMonitorManager is initialized before setting the pending pool manager
+      // We need to manually call onModuleInit since it's not a NestJS provider
+      await this.poolMonitorManager.onModuleInit();
+      
+      // Set the pending pool manager after both managers are initialized
+      this.poolMonitorManager.setPendingPoolManager(this.pendingPoolManager);
+
+      this.isInitialized = true;
+      this.logger.log('PoolMonitorService initialized and ready to monitor new pools');
+      this.logger.log(`Socket service initialized: ${this.socketService.isReady()}`);
+    } catch (error) {
+      this.logger.error('Failed to initialize PoolMonitorService:', error instanceof Error ? error.message : 'Unknown error');
+      throw error;
+    }
+  }
+
+  async onModuleDestroy() {
+    this.logger.log('Shutting down PoolMonitorService...');
+    try {
+      // Cleanup will be handled by the managers' onModuleDestroy
+      this.isInitialized = false;
+    } catch (error) {
+      this.logger.error('Error during PoolMonitorService shutdown:', error instanceof Error ? error.message : 'Unknown error');
+    }
   }
 
   private startRealTimeMonitoring(pool: PendingPool) {
-    const tokenAInfo = MINT_TO_TOKEN[pool.tokenA] || { symbol: pool.tokenA, decimals: 9, mint: pool.tokenA };
-    const tokenBInfo = MINT_TO_TOKEN[pool.tokenB] || { symbol: pool.tokenB, decimals: 6, mint: pool.tokenB };
-    
-    this.poolMonitorManager.addPool({
-      poolId: pool.poolId,
-      tokenA: tokenAInfo,
-      tokenB: tokenBInfo
-    });
-  }
-
-  public async handlePoolReady(pool: PendingPool) {
     try {
-      this.logger.log(`\n🔍 Processing pool ready event for ${pool.poolId}`);
-      this.logger.log(`Token A: ${pool.tokenA}`);
-      this.logger.log(`Token B: ${pool.tokenB}`);
+      const tokenAInfo = this.getTokenInfo(pool.token_a.mint.toString());
+      const tokenBInfo = this.getTokenInfo(pool.token_b.mint.toString());
       
-      // Double-check that the pool is actually indexed
-      this.logger.log(`Verifying pool ${pool.poolId} exists on-chain...`);
-      const poolAccount = await this.connection.getAccountInfo(new PublicKey(pool.poolId));
-      
-      if (!poolAccount) {
-        this.logger.warn(`❌ Pool ${pool.poolId} was marked as ready but account not found, skipping broadcast`);
-        return;
-      }
-
-      // Only broadcast if we have confirmed the pool exists
-      this.logger.log(`✅ Pool ${pool.poolId} verified as indexed and ready for trading`);
-      this.logger.log(`📢 Preparing to broadcast new pool (${pool.poolId})`);
-      
-      // Check socket service state before broadcasting
-      if (!this.socketService.isReady()) {
-        this.logger.error('❌ Socket service not initialized, cannot broadcast');
-        this.logger.error('Socket service state:', {
-          isInitialized: this.socketService.isReady(),
-          server: this.socketService['server'] ? 'present' : 'missing'
-        });
-        return;
-      }
-      
-      this.logger.log(`Socket service ready, broadcasting pool ${pool.poolId}...`);
-      this.socketService.broadcastNewPool(pool.poolId);
-      this.logger.log(`✅ Broadcast sent for pool ${pool.poolId}`);
-
-      // Start real-time monitoring after successful broadcast
-      this.logger.log(`Starting real-time monitoring for pool ${pool.poolId}...`);
-      this.startRealTimeMonitoring(pool);
-      this.logger.log(`✅ Real-time monitoring started for pool ${pool.poolId}`);
-      
-    } catch (error) {
-      this.logger.error(`❌ Error verifying pool ${pool.poolId}:`, error);
-      this.logger.error('Error details:', {
-        poolId: pool.poolId,
-        tokenA: pool.tokenA,
-        tokenB: pool.tokenB,
-        error: error instanceof Error ? error.message : String(error)
+      this.poolMonitorManager.addPool({
+        pool_id: pool.pool_id,
+        token_a: tokenAInfo,
+        token_b: tokenBInfo
       });
+    } catch (error) {
+      this.logger.error(`Failed to start monitoring pool ${pool.pool_id}:`, error instanceof Error ? error.message : 'Unknown error');
     }
   }
 
-  // Method to add new pools for monitoring
-  addNewPool(poolId: string, tokenA: string, tokenB: string) {
-    this.logger.log(`\n➕ Adding new pool to monitor: ${poolId}`);
-    this.logger.log(`Token A: ${tokenA}`);
-    this.logger.log(`Token B: ${tokenB}`);
-    this.logger.log(`PendingPoolManager state: ${this.pendingPoolManager ? 'initialized' : 'not initialized'}`);
-    
-    this.pendingPoolManager.addPool(poolId, tokenA, tokenB);
-    this.logger.log(`✅ Pool ${poolId} added to PendingPoolManager for monitoring`);
+  private getTokenInfo(mint: string): TokenInfo {
+    const tokenInfo = MINT_TO_TOKEN[mint];
+    if (!tokenInfo) {
+      throw new Error(`Token info not found for mint: ${mint}`);
+    }
+    return tokenInfo;
   }
 
-  // Method to get current pending pools
-  getPendingPools() {
-    return this.pendingPoolManager.getPendingPools();
+  public handlePoolReady(pool: PendingPool): void {
+    try {
+      if (!this.isInitialized) {
+        throw new Error('PoolMonitorService not initialized');
+      }
+
+      this.logger.log(`Pool ${pool.pool_id} is ready for trading`);
+      
+      const message: PoolReadyMessage = {
+        event: 'pool_ready',
+        pool_id: pool.pool_id,
+        timestamp: Date.now(),
+        data: {
+          base_token: pool.token_a.symbol,
+          quote_token: pool.token_b.symbol,
+          trade_count: pool.trade_count,
+          reserve_change_percent: pool.reserve_changes
+        }
+      };
+
+      this.socketService.broadcastPoolReady(message);
+      this.startRealTimeMonitoring(pool);
+    } catch (error) {
+      this.logger.error(`Error handling pool ready for ${pool.pool_id}:`, error instanceof Error ? error.message : 'Unknown error');
+    }
   }
 
-  // Method to stop monitoring a specific pool
-  removePool(poolId: string) {
-    this.logger.log(`\n➖ Removing pool from monitor: ${poolId}`);
-    this.pendingPoolManager.removePool(poolId);
+  public addPool(poolId: string, tokenA: string, tokenB: string): void {
+    try {
+      if (!this.isInitialized) {
+        throw new Error('PoolMonitorService not initialized');
+      }
+
+      if (!poolId || !tokenA || !tokenB) {
+        throw new Error('Invalid pool parameters: poolId, tokenA, and tokenB are required');
+      }
+
+      const tokenAInfo: TokenInfo = { 
+        symbol: tokenA, 
+        decimals: 9, 
+        mint: tokenA 
+      };
+      
+      const tokenBInfo: TokenInfo = { 
+        symbol: tokenB, 
+        decimals: 6, 
+        mint: tokenB 
+      };
+
+      if (!isTokenInfo(tokenAInfo) || !isTokenInfo(tokenBInfo)) {
+        throw new Error('Invalid token information');
+      }
+
+      this.pendingPoolManager.addPool(poolId, tokenAInfo, tokenBInfo);
+    } catch (error) {
+      this.logger.error(`Failed to add pool ${poolId}:`, error instanceof Error ? error.message : 'Unknown error');
+      throw error;
+    }
+  }
+
+  public getPendingPools() {
+    if (!this.isInitialized) {
+      throw new Error('PoolMonitorService not initialized');
+    }
+    return this.pendingPoolManager.getAllPools();
+  }
+
+  public removePool(poolId: string) {
+    try {
+      if (!this.isInitialized) {
+        throw new Error('PoolMonitorService not initialized');
+      }
+
+      if (!poolId) {
+        throw new Error('Invalid poolId');
+      }
+
+      this.logger.log(`\n➖ Removing pool from monitor: ${poolId}`);
+      this.pendingPoolManager.removePool(poolId);
+    } catch (error) {
+      this.logger.error(`Failed to remove pool ${poolId}:`, error instanceof Error ? error.message : 'Unknown error');
+      throw error;
+    }
   }
 } 

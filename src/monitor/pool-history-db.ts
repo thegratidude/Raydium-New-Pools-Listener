@@ -48,29 +48,29 @@ export function initPoolHistoryDB() {
 
 // Insert a new history record
 export function insertPoolHistory({
-  poolId,
-  baseSymbol,
-  quoteSymbol,
+  pool_id,
+  base_symbol,
+  quote_symbol,
   timestamp,
   price,
   tvl,
-  baseReserve,
-  quoteReserve,
-  buyPressure,
-  rugRisk,
+  base_reserve,
+  quote_reserve,
+  buy_pressure,
+  rug_risk,
   trend,
   volume,
 }: {
-  poolId: string;
-  baseSymbol: string;
-  quoteSymbol: string;
+  pool_id: string;
+  base_symbol: string;
+  quote_symbol: string;
   timestamp: number;
   price: number;
   tvl: number;
-  baseReserve: number;
-  quoteReserve: number;
-  buyPressure: number;
-  rugRisk: number;
+  base_reserve: number;
+  quote_reserve: number;
+  buy_pressure: number;
+  rug_risk: number;
   trend: string;
   volume: number;
 }) {
@@ -81,16 +81,16 @@ export function insertPoolHistory({
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     stmt.run(
-      poolId,
-      baseSymbol,
-      quoteSymbol,
+      pool_id,
+      base_symbol,
+      quote_symbol,
       timestamp,
       price,
       tvl,
-      baseReserve,
-      quoteReserve,
-      buyPressure,
-      rugRisk,
+      base_reserve,
+      quote_reserve,
+      buy_pressure,
+      rug_risk,
       trend,
       volume
     );

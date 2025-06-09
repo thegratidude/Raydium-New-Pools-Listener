@@ -3,8 +3,8 @@ import { Server, Socket } from 'socket.io';
 import { createServer } from 'http';
 import { Express } from 'express';
 import { execSync } from 'child_process';
-import { WebSocketGateway, WebSocketServer } from '@nestjs/websockets';
-import { PoolBroadcastMessage } from '../monitor/types';
+import { WebSocketGateway, WebSocketServer, OnGatewayConnection, OnGatewayDisconnect } from '@nestjs/websockets';
+import { MarketPressure, PoolBroadcastMessage, PoolReadyMessage, isMarketPressure } from '../types/market';
 
 @Injectable()
 @WebSocketGateway({
@@ -13,7 +13,7 @@ import { PoolBroadcastMessage } from '../monitor/types';
   },
   namespace: 'pools',
 })
-export class SocketService implements OnModuleInit, OnModuleDestroy {
+export class SocketService implements OnModuleInit, OnModuleDestroy, OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
   server: Server;
 
@@ -24,6 +24,7 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
   private httpServer: any;
   private expressApp: Express | null = null;
   private isServerReady = false;
+  private clients: Set<Socket> = new Set();
 
   constructor() {
     this.logger.log('SocketService constructed');
@@ -132,7 +133,9 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleInit() {
-    // Server initialization is now handled by setExpressApp
+    this.logger.log('Initializing SocketService...');
+    this.isServerReady = true;
+    this.logger.log('SocketService initialized');
   }
 
   afterInit() {
@@ -142,26 +145,22 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
   }
 
   handleConnection(client: Socket) {
-    this.logger.log(`✅ Client connected - ID: ${client.id}`);
+    this.logger.log(`Client connected: ${client.id}`);
+    this.clients.add(client);
   }
 
   handleDisconnect(client: Socket) {
-    this.logger.log(`❌ Client disconnected - ID: ${client.id}`);
+    this.logger.log(`Client disconnected: ${client.id}`);
+    this.clients.delete(client);
   }
 
-  broadcastNewPool(poolId: string) {
+  broadcastNewPool(message: PoolBroadcastMessage) {
     if (!this.isInitialized || !this.server) {
       this.logger.error('Socket.IO server not started');
       return;
     }
 
-    const message = {
-      type: 'new_pool',
-      poolId,
-      timestamp: new Date().toISOString(),
-    };
-
-    this.logger.log(`📢 Broadcasting new pool: ${poolId}`);
+    this.logger.log(`📢 Broadcasting new pool: ${message.pool_id}`);
     this.server.emit('new_pool', message);
   }
 
@@ -189,7 +188,10 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
     }, 10000); // 10 seconds
   }
 
-  onModuleDestroy() {
+  async onModuleDestroy() {
+    this.logger.log('Shutting down SocketService...');
+    this.isServerReady = false;
+    this.clients.clear();
     if (this.healthCheckInterval) {
       clearInterval(this.healthCheckInterval);
     }
@@ -199,20 +201,52 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
   }
 
   isReady(): boolean {
-    return this.isServerReady && this.server !== undefined;
+    return this.isServerReady;
   }
 
-  broadcastPoolUpdate(data: PoolBroadcastMessage) {
+  broadcastPoolUpdate(message: PoolBroadcastMessage) {
     if (!this.isReady()) {
-      this.logger.warn('Attempted to broadcast pool update but socket service is not ready');
+      this.logger.warn('Socket service not ready, cannot broadcast pool update');
       return;
     }
 
     try {
-      this.server.emit('pool_update', data);
-      this.logger.debug(`Broadcast pool update for ${data.pool_id}`);
+      // Validate market pressure data
+      if (message.data.market_pressure && !isMarketPressure(message.data.market_pressure)) {
+        throw new Error('Invalid market pressure data');
+      }
+
+      this.server.emit('pool_update', message);
     } catch (error) {
-      this.logger.error(`Failed to broadcast pool update: ${error.message}`);
+      this.logger.error('Error broadcasting pool update:', error instanceof Error ? error.message : 'Unknown error');
+    }
+  }
+
+  broadcastPoolReady(message: PoolReadyMessage) {
+    if (!this.isReady()) {
+      this.logger.warn('Socket service not ready, cannot broadcast pool ready');
+      return;
+    }
+
+    try {
+      this.server.emit('pool_ready', message);
+    } catch (error) {
+      this.logger.error('Error broadcasting pool ready:', error instanceof Error ? error.message : 'Unknown error');
+    }
+  }
+
+  broadcast(event: string, data: any) {
+    if (!this.isReady()) {
+      this.logger.warn('Socket service not ready, cannot broadcast');
+      return;
+    }
+    this.server.emit(event, data);
+  }
+
+  setReady(ready: boolean = true) {
+    this.isServerReady = ready;
+    if (ready) {
+      this.logger.log('Socket service is ready');
     }
   }
 } 

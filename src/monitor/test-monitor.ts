@@ -1,5 +1,7 @@
 import { Connection } from '@solana/web3.js';
 import { PoolMonitorManager } from './pool-monitor-manager';
+import { PendingPoolManager } from './pending-pool-manager';
+import { SocketService } from '../gateway/socket.service';
 import { PoolSnapshot, MarketPressure, PoolInfo, TokenInfo } from './types';
 import * as dotenv from 'dotenv';
 
@@ -57,14 +59,41 @@ function onUpdate(
   console.log('---');
 }
 
-async function testMonitor() {
-  try {
-    console.log('Starting test monitor...');
-    await manager.addPool({ poolId: TEST_POOL_INFO.poolId, tokenA: BASE_TOKEN, tokenB: QUOTE_TOKEN });
-    console.log('Pool added to monitor');
-  } catch (error) {
-    console.error('Error in test monitor:', error);
+// Mock SocketService
+class MockSocketService extends SocketService {
+  broadcast(event: string, data: any) {
+    console.log(`[MockSocketService] Broadcasting ${event}:`, data);
   }
+}
+
+async function testMonitor() {
+  const socketService = new MockSocketService();
+  
+  // Create a mock PendingPoolManager
+  const pendingPoolManager = new PendingPoolManager(
+    connection,
+    (pool) => console.log('Pool ready:', pool)
+  );
+
+  const manager = new PoolMonitorManager(
+    connection,
+    socketService,
+    pendingPoolManager
+  );
+
+  // Test adding a pool
+  const TEST_POOL = 'test_pool_id';
+  const tokenA = { symbol: 'SOL', decimals: 9, mint: 'SOL' };
+  const tokenB = { symbol: 'USDC', decimals: 6, mint: 'USDC' };
+
+  manager.addPool({
+    pool_id: TEST_POOL,
+    token_a: tokenA,
+    token_b: tokenB
+  });
+
+  // Wait for some time to see updates
+  await new Promise(resolve => setTimeout(resolve, 30000));
 }
 
 testMonitor().catch(console.error); 

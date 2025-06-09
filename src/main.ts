@@ -1,6 +1,6 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
-import { startConnection } from './scripts/new-raydium-pools/listener';
+import { startListener } from './scripts/new-raydium-pools/listener';
 import { Connection, PublicKey } from '@solana/web3.js';
 import * as dotenv from 'dotenv';
 import { execSync } from 'child_process';
@@ -74,7 +74,7 @@ async function bootstrap() {
   logger.log('Application ready');
 
   // Start the pool listener with the app instance
-  await startConnection(app, rpcConnection, RAYDIUM, INSTRUCTION_NAME);
+  await startListener(app, rpcConnection, RAYDIUM, INSTRUCTION_NAME);
 
   // Keep the application running
   await app.listen(0); // Listen on a random port since we're using our own HTTP server

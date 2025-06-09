@@ -1,4 +1,9 @@
 import { PublicKey } from '@solana/web3.js';
+import { TokenInfo, TokenMap, isTokenInfo } from '../types/token';
+import { PoolUpdate } from '../types/market';
+
+// Re-export types for convenience
+export { TokenInfo, TokenMap, isTokenInfo };
 
 export enum TrendDirection {
   Up = 'up',
@@ -52,12 +57,6 @@ type PoolDiscoveryResult = {
 
 export type { PoolDiscoveryResult };
 
-export interface TokenInfo {
-  symbol: string;
-  decimals: number;
-  mint: string;
-}
-
 export interface PoolInfo {
   poolId: string;
   baseMint: string;
@@ -67,7 +66,7 @@ export interface PoolInfo {
 }
 
 // Common token mints
-export const MINT_TO_TOKEN: Record<string, TokenInfo> = {
+export const MINT_TO_TOKEN: TokenMap = {
   'So11111111111111111111111111111111111111112': { symbol: 'SOL', decimals: 9, mint: 'So11111111111111111111111111111111111111112' },
   'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v': { symbol: 'USDC', decimals: 6, mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' },
   // Add more common tokens as needed
@@ -89,33 +88,31 @@ export type PoolUpdateCallback = (
 ) => UpdateResult;
 
 export interface PoolBroadcastMessage {
-  event: 'pool_update';
+  event: 'pool_update' | 'pool_ready';
   pool_id: string;
   timestamp: number;
   data: {
-    pair: string;
-    price: number;
-    price_change: number;
-    tvl: number;
-    volume_24h: number;
-    market_pressure: {
-      buy_pressure: number;
-      sell_pressure: number;
-      trend: string;
-      rug_risk: number;
-    };
-    reserves: {
-      base_reserve: number;
-      quote_reserve: number;
-      base_symbol: string;
-      quote_symbol: string;
-    };
-    origin_data: {
-      price: number;
-      base_reserve: number;
-      quote_reserve: number;
-      timestamp: number;
-    };
+    price?: number;
+    tvl?: number;
+    market_pressure?: MarketPressure;
+    base_token: string;
+    quote_token: string;
+    base_reserve?: number;
+    quote_reserve?: number;
+    trade_count?: number;
+    reserve_change_percent?: number;
+  };
+}
+
+export interface PoolReadyMessage {
+  event: 'pool_ready';
+  pool_id: string;
+  timestamp: number;
+  data: {
+    base_token: string;
+    quote_token: string;
+    trade_count: number;
+    reserve_change_percent: number;
   };
 }
 
@@ -151,31 +148,56 @@ export const conciseOnUpdate = (
     pool_id: poolId,
     timestamp: snapshot.timestamp,
     data: {
-      pair,
       price: snapshot.price,
-      price_change: priceChange,
       tvl: snapshot.tvl,
-      volume_24h: snapshot.volume24h,
       market_pressure: {
-        buy_pressure: pressure.buyPressure,
-        sell_pressure: pressure.sellPressure,
+        value: pressure.value,
+        direction: pressure.direction,
+        strength: pressure.strength,
+        buyPressure: pressure.buyPressure,
+        sellPressure: pressure.sellPressure,
+        rugRisk: pressure.rugRisk,
         trend: pressure.trend,
-        rug_risk: pressure.rugRisk
+        severity: pressure.severity
       },
-      reserves: {
-        base_reserve: snapshot.baseReserve,
-        quote_reserve: snapshot.quoteReserve,
-        base_symbol: baseToken.symbol,
-        quote_symbol: quoteToken.symbol
-      },
-      origin_data: {
-        price: originPrice,
-        base_reserve: originBaseReserve,
-        quote_reserve: originQuoteReserve,
-        timestamp: snapshot.timestamp
-      }
+      base_token: baseToken.symbol,
+      quote_token: quoteToken.symbol,
+      base_reserve: snapshot.baseReserve,
+      quote_reserve: snapshot.quoteReserve
     }
   };
 
   return { consoleOutput, broadcastData };
-}; 
+};
+
+// Type guard functions
+export function isPoolUpdate(obj: unknown): obj is PoolUpdate {
+  return (
+    typeof obj === 'object' &&
+    obj !== null &&
+    'pool_id' in obj &&
+    'price' in obj &&
+    'tvl' in obj &&
+    'market_pressure' in obj &&
+    'base_token' in obj &&
+    'quote_token' in obj &&
+    'base_reserve' in obj &&
+    'quote_reserve' in obj &&
+    'has_trade_data' in obj
+  );
+}
+
+export function isPoolBroadcastMessage(obj: unknown): obj is PoolBroadcastMessage {
+  return (
+    typeof obj === 'object' &&
+    obj !== null &&
+    'event' in obj &&
+    'pool_id' in obj &&
+    'timestamp' in obj &&
+    'data' in obj &&
+    typeof (obj as PoolBroadcastMessage).event === 'string' &&
+    typeof (obj as PoolBroadcastMessage).pool_id === 'string' &&
+    typeof (obj as PoolBroadcastMessage).timestamp === 'number' &&
+    typeof (obj as PoolBroadcastMessage).data === 'object'
+  );
+} 
