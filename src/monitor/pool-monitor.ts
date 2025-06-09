@@ -244,6 +244,10 @@ export class PoolMonitor {
   private readonly TRADE_THRESHOLD = 1; // Ready after first reserve change
   private readonly TRADE_WINDOW = 30000; // 30 seconds window
   private readonly RESERVE_CHANGE_THRESHOLD = 0.0005; // 0.05% - ultra sensitive for early detection
+  
+  // Polling tracking
+  private pollCount: number = 0;
+  private lastPollLogTime: number = 0;
 
   constructor(options: PoolMonitorOptions) {
     this.connection = new Connection(options.httpUrl, {
@@ -279,9 +283,25 @@ export class PoolMonitor {
 
   private async processPoolUpdate() {
     try {
+      // Track polling frequency
+      this.pollCount++;
+      const now = Date.now();
+      
+      // Log polling frequency every 10 seconds
+      if (!this.lastPollLogTime || (now - this.lastPollLogTime) > 10000) {
+        this.logger.log(`[PoolMonitor] 🔄 Poll #${this.pollCount} for ${this.tokenA.symbol}/${this.tokenB.symbol} (${this.poolId.toBase58().substring(0, 8)}...) - 1s intervals active`);
+        this.lastPollLogTime = now;
+      }
+      
+      // Log API call attempt
+      this.logger.debug(`[PoolMonitor] 🔄 Polling Raydium API for pool ${this.poolId.toBase58()} (${this.tokenA.symbol}/${this.tokenB.symbol})`);
+      
       // Use Raydium API for reliable pool data (like the old monitor.ts)
       const api = new Api({ cluster: 'mainnet', timeout: 30000 });
       const poolInfo = await api.fetchPoolById({ ids: this.poolId.toBase58() });
+      
+      // Log API response
+      this.logger.debug(`[PoolMonitor] 📡 API Response for ${this.poolId.toBase58()}: ${JSON.stringify(poolInfo, null, 2)}`);
       
       if (!Array.isArray(poolInfo) || poolInfo.length === 0 || !poolInfo[0]) {
         // Pool not found or not yet indexed - this is normal for new pools
@@ -298,6 +318,9 @@ export class PoolMonitor {
       const baseReserve = pool.mintAmountA || 0;
       const quoteReserve = pool.mintAmountB || 0;
       
+      // Log raw reserve data
+      this.logger.debug(`[PoolMonitor] 📊 Raw reserves for ${this.poolId.toBase58()}: ${baseReserve} ${this.tokenA.symbol} / ${quoteReserve} ${this.tokenB.symbol}`);
+      
       // Check if we have valid reserves
       if (baseReserve <= 0 || quoteReserve <= 0) {
         this.logger.debug(`[PoolMonitor] Pool ${this.poolId.toBase58()} has invalid reserves: ${baseReserve} ${this.tokenA.symbol} / ${quoteReserve} ${this.tokenB.symbol}`);
@@ -305,16 +328,23 @@ export class PoolMonitor {
       }
 
       // Log current reserves every 10 seconds for debugging
-      const now = Date.now();
       if (!this.lastUpdate || (now - this.lastUpdate) > 10000) {
         this.logger.log(`[PoolMonitor] 📊 ${this.tokenA.symbol}/${this.tokenB.symbol} (${this.poolId.toBase58().substring(0, 8)}...): ${baseReserve.toFixed(2)} ${this.tokenA.symbol} / ${quoteReserve.toFixed(2)} ${this.tokenB.symbol}`);
         this.lastUpdate = now;
+      }
+
+      // Log previous reserves for comparison
+      if (this.lastBaseReserve !== null && this.lastQuoteReserve !== null) {
+        const baseChange = Math.abs((baseReserve - this.lastBaseReserve) / this.lastBaseReserve);
+        const quoteChange = Math.abs((quoteReserve - this.lastQuoteReserve) / this.lastQuoteReserve);
+        this.logger.debug(`[PoolMonitor] 🔍 Reserve changes: ${(baseChange * 100).toFixed(4)}% ${this.tokenA.symbol} / ${(quoteChange * 100).toFixed(4)}% ${this.tokenB.symbol} (threshold: ${(this.RESERVE_CHANGE_THRESHOLD * 100).toFixed(3)}%)`);
       }
 
       // Detect reserve changes (this is the key insight!)
       const hasReserveChange = this.detectReserveChange(baseReserve, quoteReserve);
       
       if (hasReserveChange) {
+        this.logger.log(`🚨 RESERVE CHANGE DETECTED for ${this.poolId.toBase58()}!`);
         this.tradeCount++;
         
         if (!this.firstTradeTime) {
@@ -412,6 +442,9 @@ export class PoolMonitor {
             timestamp: Date.now()
           });
         }
+      } else {
+        // Log when no change is detected
+        this.logger.debug(`[PoolMonitor] No reserve change detected for ${this.poolId.toBase58()}`);
       }
 
       // Update last reserves for next comparison
@@ -421,6 +454,7 @@ export class PoolMonitor {
       // Set initial ratio if not set
       if (this.initialReserveRatio === null) {
         this.initialReserveRatio = quoteReserve / baseReserve;
+        this.logger.debug(`[PoolMonitor] Set initial reserve ratio for ${this.poolId.toBase58()}: ${this.initialReserveRatio}`);
       }
 
       // Reset retry count on successful update
