@@ -68,7 +68,7 @@ export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    this.logger.log(`[PendingPoolManager] Adding new pool to pending state: ${token_a.symbol}/${token_b.symbol} (${pool_id})`);
+    this.logger.log(`[PendingPoolManager] Adding new pool to pending state: ${pool_id}`);
     
     this.pendingPools.set(pool_id, {
       pool_id,
@@ -173,12 +173,36 @@ export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
         statusMessage += '\n  Pools:';
         pendingPools.forEach(pool => {
           const waitTime = Math.floor((now - pool.last_update_time) / 1000);
-          const status = pool.state === 'pending' ? '⏳ Pending' : '📊 Indexed';
           const poolIdShort = pool.pool_id.slice(0, 6);
-          const tradeInfo = pool.trade_count > 0 
-            ? ` (${pool.trade_count} trades, ${pool.reserve_changes.toFixed(2)}% reserve change)`
-            : '';
-          statusMessage += `\n    • ${poolIdShort}...: ${status}${tradeInfo} (${waitTime}s)`;
+          
+          // Determine detailed status based on pool state and conditions
+          let detailedStatus = '';
+          let tradeInfo = '';
+          
+          if (pool.state === 'pending') {
+            if (waitTime < 10) {
+              detailedStatus = '⏳ Awaiting indexing (10s delay)';
+            } else {
+              detailedStatus = '🔄 Moving to indexed state...';
+            }
+          } else if (pool.state === 'indexed') {
+            if (pool.trade_count === 0) {
+              detailedStatus = '🎧 Awaiting first swaps';
+            } else if (pool.trade_count === 1) {
+              detailedStatus = '🔥 First trade detected, waiting for more';
+            } else if (pool.trade_count >= 2) {
+              detailedStatus = '📊 Multiple trades detected';
+              tradeInfo = ` (${pool.trade_count} trades, ${pool.reserve_changes.toFixed(2)}% reserve change)`;
+            }
+            
+            // Check if we're approaching timeout
+            const timeUntilTimeout = this.MAX_WAIT_TIME - (waitTime * 1000);
+            if (timeUntilTimeout < 60000 && timeUntilTimeout > 0) { // Less than 1 minute left
+              detailedStatus += ` ⚠️ Timeout in ${Math.ceil(timeUntilTimeout / 1000)}s`;
+            }
+          }
+          
+          statusMessage += `\n    • ${poolIdShort}...: ${detailedStatus}${tradeInfo} (${waitTime}s)`;
         });
       }
     }
@@ -202,7 +226,7 @@ export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
     }
 
     try {
-      this.logger.log(`[PendingPoolManager] 🎧 Starting swap monitoring for indexed pool: ${pool.token_a.symbol}/${pool.token_b.symbol} (${pool.pool_id})`);
+      this.logger.log(`[PendingPoolManager] 🎧 Starting swap monitoring for indexed pool: ${pool.pool_id}`);
       
       // Add the pool to the PoolMonitorManager to start listening for first swaps
       this.poolMonitorManager.addPool({
@@ -305,7 +329,7 @@ export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
       indexedPools.forEach(pool => {
         const poolAge = now - pool.last_update_time;
         const ageMinutes = Math.floor(poolAge / (60 * 1000));
-        this.logger.log(`📊 Pool ${pool.token_a.symbol}/${pool.token_b.symbol} (${pool.pool_id.slice(0, 8)}...) - ${ageMinutes}m old`);
+        this.logger.log(`📊 Pool ${pool.pool_id} - ${ageMinutes}m old`);
         this.startMonitoringForFirstSwaps(pool);
       });
     } else {
