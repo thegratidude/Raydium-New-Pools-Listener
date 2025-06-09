@@ -257,6 +257,9 @@ export class PoolMonitor {
   private isSilentMode: boolean = false;
   private hasDetectedActivity: boolean = false;
 
+  // Add initial price tracking for position monitoring
+  private initialPrice: number | null = null;
+
   constructor(options: PoolMonitorOptions) {
     this.connection = new Connection(options.httpUrl, {
       wsEndpoint: options.wssUrl,
@@ -267,6 +270,25 @@ export class PoolMonitor {
     this.tokenB = options.tokenB;
     this.onUpdate = options.onUpdate;
     this.isSimulation = options.isSimulation || false;
+  }
+
+  // Add method to get colored percentage change
+  private getColoredPercentage(currentPrice: number): string {
+    if (this.initialPrice === null) {
+      this.initialPrice = currentPrice;
+      return '(0.00%)'; // First reading, no change
+    }
+
+    const percentageChange = ((currentPrice - this.initialPrice) / this.initialPrice) * 100;
+    const formattedChange = percentageChange.toFixed(2);
+    
+    if (percentageChange > 0) {
+      return `\x1b[32m(+${formattedChange}%)\x1b[0m`; // Green for positive
+    } else if (percentageChange < 0) {
+      return `\x1b[31m(${formattedChange}%)\x1b[0m`; // Red for negative
+    } else {
+      return `(${formattedChange}%)`; // No color for zero
+    }
   }
 
   async start() {
@@ -369,7 +391,9 @@ export class PoolMonitor {
           }
           
           // Simple concise output - just the % changes
-          console.log(`📊 ${this.tokenA.symbol}/${this.tokenB.symbol} | Base: ${baseChange.toFixed(4)}% | Quote: ${quoteChange.toFixed(4)}%`);
+          const currentPrice = quoteReserve / baseReserve;
+          const pricePercentage = this.getColoredPercentage(currentPrice);
+          console.log(`📊 ${this.tokenA.symbol}/${this.tokenB.symbol} | Price: $${currentPrice.toFixed(8)} ${pricePercentage} | Base: ${baseChange.toFixed(4)}% | Quote: ${quoteChange.toFixed(4)}%`);
         }
         this.lastUpdate = now;
       }

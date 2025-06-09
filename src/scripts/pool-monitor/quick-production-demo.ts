@@ -18,6 +18,7 @@ class QuickProductionDemo {
   private startTime = Date.now();
   private logStream: fs.WriteStream;
   private logFilePath: string;
+  private initialPrice: number | null = null; // Track the first price reading
 
   constructor() {
     // Ensure logs directory exists
@@ -100,6 +101,24 @@ class QuickProductionDemo {
     };
   }
 
+  private getColoredPercentage(currentPrice: number): string {
+    if (this.initialPrice === null) {
+      this.initialPrice = currentPrice;
+      return '(0.00%)'; // First reading, no change
+    }
+
+    const percentageChange = ((currentPrice - this.initialPrice) / this.initialPrice) * 100;
+    const formattedChange = percentageChange.toFixed(2);
+    
+    if (percentageChange > 0) {
+      return `\x1b[32m(+${formattedChange}%)\x1b[0m`; // Green for positive
+    } else if (percentageChange < 0) {
+      return `\x1b[31m(${formattedChange}%)\x1b[0m`; // Red for negative
+    } else {
+      return `(${formattedChange}%)`; // No color for zero
+    }
+  }
+
   private displayProductionOutput(snapshot: PoolSnapshot, pressure: MarketPressure): void {
     const elapsed = Date.now() - this.startTime;
     const minutes = Math.floor(elapsed / (1000 * 60));
@@ -120,7 +139,11 @@ class QuickProductionDemo {
     const now = new Date();
     const timestamp = now.toISOString().replace('T', ' ').substring(0, 19);
     
-    this.log(`[${timestamp}] ${consoleOutput} | Runtime: ${minutes}m${seconds}s | Updates: ${this.updateCount}`);
+    // Replace the price change percentage with our colored version
+    const coloredPercentage = this.getColoredPercentage(snapshot.price);
+    const modifiedOutput = consoleOutput.replace(/\([^)]*%\)/, coloredPercentage);
+    
+    this.log(`[${timestamp}] ${modifiedOutput} | Runtime: ${minutes}m${seconds}s | Updates: ${this.updateCount}`);
     
     // Production alerts
     if (pressure.rugRisk > 7) {
@@ -171,7 +194,12 @@ class QuickProductionDemo {
     this.log('='.repeat(50));
     this.log(`Total Runtime: ${Math.floor((Date.now() - this.startTime) / 1000)} seconds`);
     this.log(`Total Updates: ${this.updateCount}`);
+    this.log(`Initial Price: $${this.initialPrice?.toFixed(2)}`);
     this.log(`Final Price: $${this.basePrice.toFixed(2)}`);
+    if (this.initialPrice) {
+      const totalChange = ((this.basePrice - this.initialPrice) / this.initialPrice) * 100;
+      this.log(`Total Price Change: ${totalChange > 0 ? '+' : ''}${totalChange.toFixed(2)}%`);
+    }
     this.log(`Final TVL: $${(this.baseReserve * this.basePrice + this.quoteReserve).toLocaleString()}`);
     this.log(`Average Update Interval: 1 second`);
     this.log('='.repeat(50));
@@ -185,6 +213,7 @@ class QuickProductionDemo {
     this.log('✅ Timestamped logging');
     this.log('✅ Runtime tracking');
     this.log('✅ Alert system for significant events');
+    this.log('✅ Position tracking with colored percentage changes');
     this.log('');
     this.log(`📁 Complete log saved to: ${this.logFilePath}`);
     
