@@ -115,11 +115,19 @@ export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
     const now = Date.now();
     let pendingCount = 0;
     let indexedCount = 0;
+    const TWO_HOURS_MS = 2 * 60 * 60 * 1000; // 2 hours in milliseconds
 
     for (const [pool_id, pool] of this.pendingPools.entries()) {
       const timeSinceCreation = now - pool.last_update_time;
       const timeSinceLastCheck = now - pool.last_update_time;
       pool.last_update_time = now;
+
+      // Check if pool is older than 2 hours and remove it
+      if (timeSinceCreation > TWO_HOURS_MS) {
+        this.logger.log(`[PendingPoolManager] 🕐 Removing old pool ${pool_id} - ${Math.floor(timeSinceCreation / (60 * 60 * 1000))}h ${Math.floor((timeSinceCreation % (60 * 60 * 1000)) / (60 * 1000))}m old`);
+        this.pendingPools.delete(pool_id);
+        continue;
+      }
 
       switch (pool.state) {
         case 'pending':
@@ -259,14 +267,35 @@ export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const indexedPools = Array.from(this.pendingPools.values()).filter(pool => pool.state === 'indexed');
+    const now = Date.now();
+    const TWO_HOURS_MS = 2 * 60 * 60 * 1000; // 2 hours in milliseconds
+    
+    const indexedPools = Array.from(this.pendingPools.values()).filter(pool => {
+      if (pool.state !== 'indexed') return false;
+      
+      // Check if pool is older than 2 hours
+      const poolAge = now - pool.last_update_time;
+      if (poolAge > TWO_HOURS_MS) {
+        this.logger.log(`[PendingPoolManager] 🕐 Skipping pool ${pool.pool_id} - too old (${Math.floor(poolAge / (60 * 60 * 1000))}h ${Math.floor((poolAge % (60 * 60 * 1000)) / (60 * 1000))}m old)`);
+        // Remove old pools from tracking
+        this.pendingPools.delete(pool.pool_id);
+        return false;
+      }
+      
+      return true;
+    });
     
     if (indexedPools.length > 0) {
-      this.logger.log(`[PendingPoolManager] 🎧 Starting swap monitoring for ${indexedPools.length} existing indexed pools`);
+      this.logger.log(`[PendingPoolManager] 🎧 Starting swap monitoring for ${indexedPools.length} existing indexed pools (filtered out pools older than 2 hours)`);
       
       indexedPools.forEach(pool => {
+        const poolAge = now - pool.last_update_time;
+        const ageMinutes = Math.floor(poolAge / (60 * 1000));
+        this.logger.log(`[PendingPoolManager] 📊 Pool ${pool.token_a.symbol}/${pool.token_b.symbol} (${pool.pool_id.slice(0, 8)}...) - ${ageMinutes}m old`);
         this.startMonitoringForFirstSwaps(pool);
       });
+    } else {
+      this.logger.log('[PendingPoolManager] No valid indexed pools to monitor (all were older than 2 hours)');
     }
   }
 } 
