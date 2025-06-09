@@ -96,8 +96,7 @@ export class GatewayService implements OnModuleInit, OnModuleDestroy {
       time_since_last_check_ms: timeSinceLastCheck
     };
 
-    this.logger.log(`🏥 Broadcasting health message: ${JSON.stringify(message)}`);
-    this.logger.log(`🏥 Server instance: ${this.socketService.server ? 'exists' : 'null'}`);
+    this.logger.log(`🏥 Broadcasting health message...`);
     
     // Emit to the default namespace where the Python client is connecting
     this.socketService.server.emit('health', message);
