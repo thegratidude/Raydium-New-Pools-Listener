@@ -1,34 +1,30 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
-import { WebSocketGateway, WebSocketServer, OnGatewayInit } from '@nestjs/websockets';
 import { Server } from 'socket.io';
+import { SocketService } from './socket.service';
 
 const HEALTH_CHECK_INTERVAL_MS = 10000; // 10 seconds
 const SERVER_INIT_TIMEOUT_MS = 10000;   // 10 seconds
 const SERVER_INIT_POLL_MS = 500;        // 500ms
 
 @Injectable()
-@WebSocketGateway({
-  cors: {
-    origin: '*',
-    methods: ['GET', 'POST'],
-    credentials: true,
-  },
-  namespace: '/',
-})
-export class GatewayService implements OnGatewayInit, OnModuleInit, OnModuleDestroy {
+export class GatewayService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(GatewayService.name);
   private isInitialized = false;
   private healthCheckInterval: NodeJS.Timeout | null = null;
+  
+  // Message counting for health checks
+  private messageCounts: Map<string, number> = new Map();
+  private lastHealthCheck: number = Date.now();
+  private totalMessagesSinceLastCheck: number = 0;
 
-  @WebSocketServer()
-  server: Server;
+  constructor(private socketService: SocketService) {}
 
   onModuleInit() {
     this.logger.log('Waiting for Socket.IO server to initialize...');
     const startTime = Date.now();
     
     const poll = () => {
-      if (this.server) {
+      if (this.socketService.isReady() && this.socketService.server) {
         this.logger.log('✅ Socket.IO server successfully initialized');
         this.isInitialized = true;
         this.startHealthChecks();
@@ -48,11 +44,6 @@ export class GatewayService implements OnGatewayInit, OnModuleInit, OnModuleDest
 
   onModuleDestroy() {
     this.stopHealthChecks();
-  }
-
-  afterInit(server: Server) {
-    this.logger.log('Socket.IO Gateway initialized');
-    this.isInitialized = true;
   }
 
   private startHealthChecks() {
@@ -83,7 +74,8 @@ export class GatewayService implements OnGatewayInit, OnModuleInit, OnModuleDest
     };
 
     this.logger.log(`📢 Broadcasting new pool: ${poolId}`);
-    this.server.emit('newPool', message);
+    this.trackMessage('new_pool');
+    this.socketService.server.emit('new_pool', message);
   }
 
   broadcastHealth(uptime: number) {
@@ -92,12 +84,35 @@ export class GatewayService implements OnGatewayInit, OnModuleInit, OnModuleDest
       return;
     }
 
+    const now = Date.now();
+    const timeSinceLastCheck = now - this.lastHealthCheck;
+    const messagesPerMinute = timeSinceLastCheck > 0 ? (this.totalMessagesSinceLastCheck / timeSinceLastCheck) * 60000 : 0;
+
     const message = {
       timestamp: new Date().toISOString(),
       uptime,
+      messages_since_last_check: this.totalMessagesSinceLastCheck,
+      messages_per_minute: Math.round(messagesPerMinute),
+      time_since_last_check_ms: timeSinceLastCheck
     };
 
-    this.server.emit('health', message);
+    this.logger.log(`🏥 Broadcasting health message: ${JSON.stringify(message)}`);
+    this.logger.log(`🏥 Server instance: ${this.socketService.server ? 'exists' : 'null'}`);
+    
+    // Emit to the default namespace where the Python client is connecting
+    this.socketService.server.emit('health', message);
+    
+    // Reset counters for next check
+    this.lastHealthCheck = now;
+    this.totalMessagesSinceLastCheck = 0;
+    this.messageCounts.clear();
+  }
+
+  // Method to track message counts
+  private trackMessage(eventType: string) {
+    this.totalMessagesSinceLastCheck++;
+    const currentCount = this.messageCounts.get(eventType) || 0;
+    this.messageCounts.set(eventType, currentCount + 1);
   }
 
   isReady(): boolean {

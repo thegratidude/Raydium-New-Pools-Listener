@@ -3,20 +3,10 @@ import { Server, Socket } from 'socket.io';
 import { createServer } from 'http';
 import { Express } from 'express';
 import { execSync } from 'child_process';
-import { WebSocketGateway, WebSocketServer, OnGatewayConnection, OnGatewayDisconnect } from '@nestjs/websockets';
 import { MarketPressure, PoolBroadcastMessage, PoolReadyMessage, isMarketPressure } from '../types/market';
 
 @Injectable()
-@WebSocketGateway({
-  cors: {
-    origin: '*',
-  },
-  namespace: 'pools',
-})
-export class SocketService implements OnModuleInit, OnModuleDestroy, OnGatewayConnection, OnGatewayDisconnect {
-  @WebSocketServer()
-  server: Server;
-
+export class SocketService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(SocketService.name);
   private healthCheckInterval: NodeJS.Timeout | null = null;
   private readonly PORT = 5001;
@@ -25,12 +15,15 @@ export class SocketService implements OnModuleInit, OnModuleDestroy, OnGatewayCo
   private expressApp: Express | null = null;
   private isServerReady = false;
   private clients: Set<Socket> = new Set();
+  public server: Server;
+  
+  // Message counting for health checks
+  private messageCounts: Map<string, number> = new Map();
+  private lastHealthCheck: number = Date.now();
+  private totalMessagesSinceLastCheck: number = 0;
 
   constructor() {
     this.logger.log('SocketService constructed');
-    this.server?.on('connection', () => {
-      this.logger.log('New client connected to pools namespace');
-    });
   }
 
   setExpressApp(app: Express) {
@@ -138,22 +131,6 @@ export class SocketService implements OnModuleInit, OnModuleDestroy, OnGatewayCo
     this.logger.log('SocketService initialized');
   }
 
-  afterInit() {
-    this.logger.log('Socket.IO Gateway ready');
-    this.isServerReady = true;
-    this.logger.log('Socket service initialized and ready for connections');
-  }
-
-  handleConnection(client: Socket) {
-    this.logger.log(`Client connected: ${client.id}`);
-    this.clients.add(client);
-  }
-
-  handleDisconnect(client: Socket) {
-    this.logger.log(`Client disconnected: ${client.id}`);
-    this.clients.delete(client);
-  }
-
   broadcastNewPool(message: PoolBroadcastMessage) {
     if (!this.isInitialized || !this.server) {
       this.logger.error('Socket.IO server not started');
@@ -161,6 +138,7 @@ export class SocketService implements OnModuleInit, OnModuleDestroy, OnGatewayCo
     }
 
     this.logger.log(`📢 Broadcasting new pool: ${message.pool_id}`);
+    this.trackMessage('new_pool');
     this.server.emit('new_pool', message);
   }
 
@@ -169,11 +147,36 @@ export class SocketService implements OnModuleInit, OnModuleDestroy, OnGatewayCo
       return;
     }
 
+    const now = Date.now();
+    const timeSinceLastCheck = now - this.lastHealthCheck;
+    const messagesPerMinute = timeSinceLastCheck > 0 ? (this.totalMessagesSinceLastCheck / timeSinceLastCheck) * 60000 : 0;
+
     const message = {
       timestamp: new Date().toISOString(),
       uptime,
+      messages_since_last_check: this.totalMessagesSinceLastCheck,
+      messages_per_minute: Math.round(messagesPerMinute),
+      time_since_last_check_ms: timeSinceLastCheck,
+      active_clients: this.clients.size
     };
+    
+    // Emit to the pools namespace (for existing clients)
     this.server.emit('health', message);
+    
+    // The server.emit() should already broadcast to all connected clients
+    // including those in the default namespace
+    
+    // Reset counters for next check
+    this.lastHealthCheck = now;
+    this.totalMessagesSinceLastCheck = 0;
+    this.messageCounts.clear();
+  }
+
+  // Method to track message counts
+  private trackMessage(eventType: string) {
+    this.totalMessagesSinceLastCheck++;
+    const currentCount = this.messageCounts.get(eventType) || 0;
+    this.messageCounts.set(eventType, currentCount + 1);
   }
 
   private startHealthChecks() {
@@ -185,7 +188,7 @@ export class SocketService implements OnModuleInit, OnModuleDestroy, OnGatewayCo
     this.healthCheckInterval = setInterval(() => {
       const uptime = Math.floor((Date.now() - startTime) / 1000);
       this.broadcastHealth(uptime);
-    }, 10000); // 10 seconds
+    }, 10000); // Changed back to 10 seconds
   }
 
   async onModuleDestroy() {
@@ -216,6 +219,7 @@ export class SocketService implements OnModuleInit, OnModuleDestroy, OnGatewayCo
         throw new Error('Invalid market pressure data');
       }
 
+      this.trackMessage('pool_update');
       this.server.emit('pool_update', message);
     } catch (error) {
       this.logger.error('Error broadcasting pool update:', error instanceof Error ? error.message : 'Unknown error');
@@ -229,6 +233,7 @@ export class SocketService implements OnModuleInit, OnModuleDestroy, OnGatewayCo
     }
 
     try {
+      this.trackMessage('pool_ready');
       this.server.emit('pool_ready', message);
     } catch (error) {
       this.logger.error('Error broadcasting pool ready:', error instanceof Error ? error.message : 'Unknown error');

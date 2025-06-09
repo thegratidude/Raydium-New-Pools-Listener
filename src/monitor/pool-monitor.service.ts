@@ -58,6 +58,12 @@ export class PoolMonitorService implements OnModuleInit, OnModuleDestroy {
         throw new Error('Socket.IO server failed to initialize within 10 seconds');
       }
 
+      // Initialize PendingPoolManager first
+      await this.pendingPoolManager.onModuleInit();
+      
+      // Start the PendingPoolManager monitoring system
+      this.pendingPoolManager.start();
+      
       // Ensure PoolMonitorManager is initialized before setting the pending pool manager
       // We need to manually call onModuleInit since it's not a NestJS provider
       await this.poolMonitorManager.onModuleInit();
@@ -77,6 +83,12 @@ export class PoolMonitorService implements OnModuleInit, OnModuleDestroy {
   async onModuleDestroy() {
     this.logger.log('Shutting down PoolMonitorService...');
     try {
+      // Stop and cleanup PendingPoolManager
+      if (this.pendingPoolManager) {
+        this.pendingPoolManager.stop();
+        await this.pendingPoolManager.onModuleDestroy();
+      }
+      
       // Cleanup will be handled by the managers' onModuleDestroy
       this.isInitialized = false;
     } catch (error) {

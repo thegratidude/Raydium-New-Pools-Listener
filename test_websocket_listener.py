@@ -122,6 +122,7 @@ async def on_new_pool(data):
 @sio.on('health')
 async def on_health(data):
     """Handle health check events"""
+    print(f"{Fore.GREEN}🏥 HEALTH MESSAGE RECEIVED!{Style.RESET_ALL}")
     try:
         timestamp = datetime.fromisoformat(data.get('timestamp', '').replace('Z', '+00:00'))
         formatted_time = timestamp.strftime('%Y-%m-%d %H:%M:%S')

@@ -3,6 +3,7 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from '../../app.module';
 import { PoolMonitorService } from '../../monitor/pool-monitor.service';
+import { HealthMonitorService } from '../../monitor/health-monitor.service';
 import { sleep } from '../../utils/sleep';
 import * as dotenv from 'dotenv';
 
@@ -100,6 +101,7 @@ export async function startListener(
   instructionName: string
 ) {
   const poolMonitorService = app.get(PoolMonitorService);
+  const healthMonitorService = app.get(HealthMonitorService);
 
   // The SocketService is already handling the HTTP server on port 5001
   // No need to call app.listen(5001) here
@@ -112,6 +114,9 @@ export async function startListener(
     raydiumProgram,
     ({ logs, err, signature }) => {
       if (err) return;
+
+      // Track all Raydium messages for health monitoring
+      healthMonitorService.trackRaydiumMessage();
 
       if (logs && logs.some((log) => log.includes(instructionName))) {
         logger.log(
