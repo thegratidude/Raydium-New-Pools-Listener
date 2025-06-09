@@ -8,7 +8,15 @@ import { GatewayModule } from '../gateway/gateway.module';
   imports: [GatewayModule],
   providers: [
     PoolMonitorService,
-    PoolMonitorManager,
+    {
+      provide: PoolMonitorManager,
+      useFactory: (connection: Connection) => {
+        const HTTP_URL = process.env.HTTP_URL!;
+        const WSS_URL = process.env.WSS_URL!;
+        return new PoolMonitorManager(connection, undefined, HTTP_URL, WSS_URL);
+      },
+      inject: [Connection],
+    },
     {
       provide: Connection,
       useFactory: () => {

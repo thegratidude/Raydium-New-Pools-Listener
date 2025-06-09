@@ -1,51 +1,40 @@
-import { config } from 'dotenv';
-config();
 import { Connection } from '@solana/web3.js';
 import { PendingPoolManager } from './pending-pool-manager';
+import { PoolMonitorService } from './pool-monitor.service';
+import { SocketService } from '../gateway/socket.service';
+import { PoolMonitorManager } from './pool-monitor-manager';
+import express from 'express';
+import * as dotenv from 'dotenv';
+
+dotenv.config();
 
 const HTTP_URL = process.env.HTTP_URL!;
+
+// Create connection
 const connection = new Connection(HTTP_URL);
 
-const knownPool = {
-  poolId: '58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2', // SOL/USDC
-  tokenA: 'SOL',
-  tokenB: 'USDC',
-};
-const fakePool = {
-  poolId: '2uL5j6h8k9m1p3r5t7w9z1x3v5b7n9q2s4u6w8y1a3c5e',
-  tokenA: 'FAKE',
-  tokenB: 'USDC',
-};
+// Create mock Express app
+const app = express();
 
-let resolved = 0;
+// Create required services
+const socketService = new SocketService();
+const poolMonitorManager = new PoolMonitorManager(connection, socketService);
+const poolMonitorService = new PoolMonitorService(connection, socketService, poolMonitorManager);
 
-const manager = new PendingPoolManager({
-  connection,
-  checkInterval: 10_000, // 10s for test
-  maxAttempts: 3,        // quick fail for fake
-  onPoolReady: (pool) => {
-    console.log(`✅ Indexed: ${pool.tokenA}/${pool.tokenB} (${pool.poolId}) after ${pool.attempts} attempts`);
-    resolved++;
-    if (resolved === 2) {
-      manager.stop();
-      process.exit(0);
-    }
-  },
-});
+// Create manager with required dependencies
+const manager = new PendingPoolManager(connection, poolMonitorService);
 
-manager.addPool(knownPool.poolId, knownPool.tokenA, knownPool.tokenB);
-manager.addPool(fakePool.poolId, fakePool.tokenA, fakePool.tokenB);
+// Test pool
+const TEST_POOL = '58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2';
 
-// Also log failures
-setInterval(() => {
-  const failed = manager.getPendingPools().filter(p => p.state === 'failed');
-  for (const pool of failed) {
-    console.log(`❌ Failed: ${pool.tokenA}/${pool.tokenB} (${pool.poolId}) after ${pool.attempts} attempts`);
-    resolved++;
-    manager.removePool(pool.poolId);
-    if (resolved === 2) {
-      manager.stop();
-      process.exit(0);
-    }
+async function testPendingPoolManager() {
+  try {
+    console.log('Starting test pending pool manager...');
+    manager.addPool(TEST_POOL, 'SOL', 'USDC');
+    console.log('Pool added to pending manager');
+  } catch (error) {
+    console.error('Error in test pending pool manager:', error);
   }
-}, 2000); 
+}
+
+testPendingPoolManager().catch(console.error); 

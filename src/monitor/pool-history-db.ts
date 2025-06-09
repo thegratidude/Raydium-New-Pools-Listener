@@ -44,55 +44,6 @@ export function initPoolHistoryDB() {
     );
     CREATE INDEX IF NOT EXISTS idx_swap_tx_time ON swap_tx_history(pool_id, timestamp);
   `);
-  // Test DB write/read/delete after schema is created (startup only)
-  const testData = {
-    poolId: '__test__',
-    baseSymbol: 'TEST',
-    quoteSymbol: 'TEST',
-    timestamp: Math.floor(Date.now() / 1000),
-    price: 1.23,
-    tvl: 12345,
-    baseReserve: 100,
-    quoteReserve: 200,
-    buyPressure: 50,
-    rugRisk: 10,
-    trend: 'sideways',
-    volume: 999,
-  };
-  try {
-    // Insert test row
-    const stmt = db.prepare(`
-      INSERT OR IGNORE INTO pool_history
-        (pool_id, base_symbol, quote_symbol, timestamp, price, tvl, base_reserve, quote_reserve, buy_pressure, rug_risk, trend, volume)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    stmt.run(
-      testData.poolId,
-      testData.baseSymbol,
-      testData.quoteSymbol,
-      testData.timestamp,
-      testData.price,
-      testData.tvl,
-      testData.baseReserve,
-      testData.quoteReserve,
-      testData.buyPressure,
-      testData.rugRisk,
-      testData.trend,
-      testData.volume
-    );
-    // Read it back
-    const row = db.prepare('SELECT * FROM pool_history WHERE pool_id = ?').get(testData.poolId);
-    if (row) {
-      console.log('[pool-history-db] Test DB write/read successful:', row);
-      // Delete test row
-      db.prepare('DELETE FROM pool_history WHERE pool_id = ?').run(testData.poolId);
-      console.log('[pool-history-db] Test DB row deleted.');
-    } else {
-      console.error('[pool-history-db] Test DB write/read failed: row not found');
-    }
-  } catch (err) {
-    console.error('[pool-history-db] Test DB write/read/delete error:', err);
-  }
 }
 
 // Insert a new history record

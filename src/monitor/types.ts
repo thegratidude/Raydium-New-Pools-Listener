@@ -20,18 +20,26 @@ export interface PoolSnapshot {
   volumeChange: number;
   volume24h: number; // 24h volume in USD
   suspicious: boolean;
+  baseDecimals: number;
+  quoteDecimals: number;
+  buySlippage: number;
+  sellSlippage: number;
+  reserveRatio: number;        // Current reserve ratio (quote/base)
+  initialReserveRatio: number; // Initial reserve ratio when monitoring started
+  ratioChange: number;         // Percentage change in reserve ratio
 }
 
 // MarketPressure: analytics for buy/sell pressure, rug risk, and trend
-export interface MarketPressure {
-  buyPressure: number;    // 0-100 scale
-  sellPressure: number;   // 0-100 scale
-  rugRisk: number;        // 0-100 scale
+export type MarketPressure = {
+  value: number;
+  direction: TrendDirection;
+  strength: number;
+  buyPressure: number;
+  sellPressure: number;
+  rugRisk: number;
   trend: TrendDirection;
-  value: number;          // Combined pressure value
-  direction: 'up' | 'down' | 'neutral';
-  strength: 'strong' | 'moderate' | 'weak';
-}
+  severity: 'low' | 'medium' | 'high';
+};
 
 // PoolDiscoveryResult: for integration with listener
 type PoolDiscoveryResult = {
@@ -65,19 +73,53 @@ export const MINT_TO_TOKEN: Record<string, TokenInfo> = {
   // Add more common tokens as needed
 };
 
-// Update callback type
+export interface UpdateResult {
+  consoleOutput: string;
+  broadcastData: PoolBroadcastMessage;
+}
+
 export type PoolUpdateCallback = (
   snapshot: PoolSnapshot,
   pressure: MarketPressure,
-  originPrice: number | null,
-  originBaseReserve: number | null,
-  originQuoteReserve: number | null,
-  previousSnapshot: PoolSnapshot | null,
+  originPrice: number,
+  originBaseReserve: number,
+  originQuoteReserve: number,
+  prevSnapshot: PoolSnapshot | null,
   poolId: string
-) => void;
+) => UpdateResult;
 
-// Default update callback
-export function conciseOnUpdate(
+export interface PoolBroadcastMessage {
+  event: 'pool_update';
+  pool_id: string;
+  timestamp: number;
+  data: {
+    pair: string;
+    price: number;
+    price_change: number;
+    tvl: number;
+    volume_24h: number;
+    market_pressure: {
+      buy_pressure: number;
+      sell_pressure: number;
+      trend: string;
+      rug_risk: number;
+    };
+    reserves: {
+      base_reserve: number;
+      quote_reserve: number;
+      base_symbol: string;
+      quote_symbol: string;
+    };
+    origin_data: {
+      price: number;
+      base_reserve: number;
+      quote_reserve: number;
+      timestamp: number;
+    };
+  };
+}
+
+export const conciseOnUpdate = (
   snapshot: PoolSnapshot,
   pressure: MarketPressure,
   baseToken: TokenInfo,
@@ -85,19 +127,55 @@ export function conciseOnUpdate(
   originPrice: number | null,
   originBaseReserve: number | null,
   originQuoteReserve: number | null,
-  previousSnapshot: PoolSnapshot | null,
+  prevSnapshot: PoolSnapshot | null,
   poolId: string
-) {
-  const priceChange = previousSnapshot ? ((snapshot.price - previousSnapshot.price) / previousSnapshot.price) * 100 : 0;
-  const volumeChange = snapshot.volumeChange;
-  const tvl = snapshot.tvl;
+): { consoleOutput: string; broadcastData: PoolBroadcastMessage } => {
+  const pair = `${baseToken.symbol}/${quoteToken.symbol}`;
+  const priceChange = prevSnapshot ? ((snapshot.price - prevSnapshot.price) / prevSnapshot.price) * 100 : 0;
   
-  console.log(
-    `📊 ${baseToken.symbol}/${quoteToken.symbol} | ` +
+  // Format console output
+  const consoleOutput = 
+    `📊 ${pair} | ` +
     `Price: $${snapshot.price.toFixed(8)} (${priceChange.toFixed(2)}%) | ` +
-    `Vol: $${volumeChange.toLocaleString()} | ` +
-    `TVL: $${tvl.toLocaleString()} | ` +
-    `Pressure: ${pressure.value.toFixed(2)} (${pressure.direction} - ${pressure.strength}) | ` +
-    `Buy: ${pressure.buyPressure} | Sell: ${pressure.sellPressure} | Rug: ${pressure.rugRisk} | Trend: ${pressure.trend}`
-  );
-} 
+    `Vol: $${snapshot.volume24h.toLocaleString()} | ` +
+    `TVL: $${snapshot.tvl.toLocaleString()} | ` +
+    `Pressure: ${pressure.buyPressure.toFixed(2)} (${pressure.trend} - ${pressure.rugRisk}) | ` +
+    `Buy: ${pressure.buyPressure.toFixed(0)} | ` +
+    `Sell: ${pressure.sellPressure.toFixed(0)} | ` +
+    `Rug: ${pressure.rugRisk} | ` +
+    `Trend: ${pressure.trend}`;
+
+  // Format broadcast data
+  const broadcastData: PoolBroadcastMessage = {
+    event: 'pool_update',
+    pool_id: poolId,
+    timestamp: snapshot.timestamp,
+    data: {
+      pair,
+      price: snapshot.price,
+      price_change: priceChange,
+      tvl: snapshot.tvl,
+      volume_24h: snapshot.volume24h,
+      market_pressure: {
+        buy_pressure: pressure.buyPressure,
+        sell_pressure: pressure.sellPressure,
+        trend: pressure.trend,
+        rug_risk: pressure.rugRisk
+      },
+      reserves: {
+        base_reserve: snapshot.baseReserve,
+        quote_reserve: snapshot.quoteReserve,
+        base_symbol: baseToken.symbol,
+        quote_symbol: quoteToken.symbol
+      },
+      origin_data: {
+        price: originPrice,
+        base_reserve: originBaseReserve,
+        quote_reserve: originQuoteReserve,
+        timestamp: snapshot.timestamp
+      }
+    }
+  };
+
+  return { consoleOutput, broadcastData };
+}; 

@@ -1,25 +1,48 @@
-import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Inject } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
 import { createServer } from 'http';
 import { Express } from 'express';
 import { execSync } from 'child_process';
-
-export const EXPRESS_APP = 'EXPRESS_APP';
+import { WebSocketGateway, WebSocketServer } from '@nestjs/websockets';
+import { PoolBroadcastMessage } from '../monitor/types';
 
 @Injectable()
+@WebSocketGateway({
+  cors: {
+    origin: '*',
+  },
+  namespace: 'pools',
+})
 export class SocketService implements OnModuleInit, OnModuleDestroy {
+  @WebSocketServer()
+  server: Server;
+
   private readonly logger = new Logger(SocketService.name);
-  private server: Server;
   private healthCheckInterval: NodeJS.Timeout | null = null;
   private readonly PORT = 5001;
   private isInitialized = false;
   private httpServer: any;
+  private expressApp: Express | null = null;
+  private isServerReady = false;
 
-  constructor(@Inject(EXPRESS_APP) private readonly app: Express) {
+  constructor() {
     this.logger.log('SocketService constructed');
+    this.server?.on('connection', () => {
+      this.logger.log('New client connected to pools namespace');
+    });
   }
 
-  async onModuleInit() {
+  setExpressApp(app: Express) {
+    this.expressApp = app;
+    this.initializeServer();
+  }
+
+  private async initializeServer() {
+    if (!this.expressApp) {
+      this.logger.error('Express app not set');
+      return;
+    }
+
     try {
       this.logger.log('Starting SocketService initialization...');
       
@@ -33,7 +56,7 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
 
       // Create HTTP server
       this.logger.log('Creating HTTP server...');
-      this.httpServer = createServer(this.app);
+      this.httpServer = createServer(this.expressApp);
       
       // Create Socket.IO server with enhanced configuration
       this.logger.log('Creating Socket.IO server...');
@@ -78,6 +101,7 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
           this.logger.log(`Server address: http://localhost:${this.PORT}`);
           this.isInitialized = true;
           this.startHealthChecks();
+          this.isServerReady = true;
           resolve();
         });
 
@@ -107,8 +131,14 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  async onModuleInit() {
+    // Server initialization is now handled by setExpressApp
+  }
+
   afterInit() {
     this.logger.log('Socket.IO Gateway ready');
+    this.isServerReady = true;
+    this.logger.log('Socket service initialized and ready for connections');
   }
 
   handleConnection(client: Socket) {
@@ -169,6 +199,20 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
   }
 
   isReady(): boolean {
-    return this.isInitialized;
+    return this.isServerReady && this.server !== undefined;
+  }
+
+  broadcastPoolUpdate(data: PoolBroadcastMessage) {
+    if (!this.isReady()) {
+      this.logger.warn('Attempted to broadcast pool update but socket service is not ready');
+      return;
+    }
+
+    try {
+      this.server.emit('pool_update', data);
+      this.logger.debug(`Broadcast pool update for ${data.pool_id}`);
+    } catch (error) {
+      this.logger.error(`Failed to broadcast pool update: ${error.message}`);
+    }
   }
 } 

@@ -114,8 +114,6 @@ export class PoolMonitor {
    * Update the complete pool state
    */
   private async updateState(): Promise<void> {
-    // Debug: log each polling interval
-    // console.log(`Polling updateState for pool: ${this.config.poolAddress.toString()}`);
     try {
       const reserves = await this.updateReserves();
       const trades = await this.updateTrades();
@@ -145,14 +143,12 @@ export class PoolMonitor {
         baseSymbol = tokenB.symbol;
         quoteSymbol = tokenA.symbol;
       } else {
-        // If neither token is SOL, skip
         console.warn(`⚠️  Pool does not contain SOL/WSOL: ${this.config.poolAddress.toString()}`);
         return;
       }
 
       // Defensive: skip if reserves are zero
       if (!solAmount || !otherTokenAmount || reserves.totalLiquidity === 0) {
-        // Mute output for pools with zero reserves or TVL
         return;
       }
 
@@ -162,10 +158,6 @@ export class PoolMonitor {
       const tvl = reserves.totalLiquidity;
       const volume24h = trades.volume;
       const isViable = tvl > 45000 && volume24h > 5000 && priceImpact < 2;
-      const reason = isViable ? undefined :
-        tvl <= 45000 ? 'TVL too low (needs >$45K for small trades)' :
-        volume24h <= 5000 ? '24h volume too low (needs >$5K for new pools)' :
-        priceImpact >= 2 ? 'Price impact too high (needs <2% for 1 SOL trade)' : undefined;
 
       // Only display monitoring results for viable pools
       if (!isViable) {
@@ -176,39 +168,32 @@ export class PoolMonitor {
       const poolKey = this.config.poolAddress.toString();
       const prev = this.previousState[poolKey];
       const first = this.firstUpdate[poolKey];
-      this.previousState[poolKey] = { price: price.currentPrice, tvl, volume24h };
+      this.previousState[poolKey] = { 
+        priceChangePercent: price.priceChangePercent,
+        tvl, 
+        volume24h 
+      };
       this.firstUpdate[poolKey] = false;
 
       if (first) {
-        // Detailed summary on first update (symbols only)
         console.log(`\n════════════════════════════════════════════════════════════════════════════════`);
         console.log(`🪙 Pair: ${baseSymbol}/${quoteSymbol}`);
-        console.log(`💰 Price: $${price.currentPrice.toFixed(8)}`);
+        console.log(`📈 Price Change: ${price.priceChangePercent.toFixed(2)}%`);
         console.log(`💎 TVL: $${tvl.toLocaleString()}`);
-        console.log(`📈 24h Volume: $${volume24h.toLocaleString()}`);
-        console.log(`💸 Fee Rate: ${(trades.volume > 0 ? '0.25%' : 'N/A')}`);
-        console.log(`📊 Price Impact (1 ${baseSymbol}): ${priceImpact.toFixed(4)}%`);
-        console.log(`✅ Viable: Yes`);
-        console.log(`Token A (${tokenA.symbol}): ${tokenA.amount.toLocaleString()} tokens`);
-        console.log(`Token B (${tokenB.symbol}): ${tokenB.amount.toLocaleString()} tokens`);
+        console.log(`📊 Price Impact (1 ${baseSymbol}): ${priceImpact.toFixed(3)}%`);
         console.log(`════════════════════════════════════════════════════════════════════════════════\n`);
       } else {
-        // Concise single-line update (symbols only)
-        const priceDelta = prev ? price.currentPrice - prev.price : 0;
-        const tvlDelta = prev ? tvl - prev.tvl : 0;
-        const volDelta = prev ? volume24h - prev.volume24h : 0;
+        const priceDelta = price.priceChangePercent - (prev?.priceChangePercent || 0);
         const sign = (n: number) => n > 0 ? '+' : (n < 0 ? '-' : '');
         console.log(
           `📊 ${baseSymbol}/${quoteSymbol} | ` +
-          `P: $${price.currentPrice.toFixed(4)}${sign(priceDelta)} | ` +
-          `TVL: $${tvl.toLocaleString()}${sign(tvlDelta)} | ` +
-          `Vol: $${volume24h.toLocaleString()}${sign(volDelta)} | ` +
-          `Impact(1${baseSymbol}): ${priceImpact.toFixed(3)}% | ` +
-          `Viable: ✅`
+          `P: ${price.priceChangePercent.toFixed(2)}%${sign(priceDelta)} | ` +
+          `TVL: $${tvl.toLocaleString()} | ` +
+          `Impact: ${priceImpact.toFixed(2)}%`
         );
       }
 
-      // Callbacks if needed
+      // Callbacks
       this.onReserveUpdate?.(reserves);
       this.onTradeUpdate?.(trades);
       this.onPriceUpdate?.(price);
@@ -316,21 +301,40 @@ export class PoolMonitor {
         throw new Error('Pool not found or not yet indexed');
       }
       const pool = poolInfo[0];
+
+      // Get current reserves
+      const quoteReserve = pool.mintAmountB || 0;  // SOL
+      const baseReserve = pool.mintAmountA || 0;   // Base token
+      
+      // Calculate current ratio
+      const currentRatio = quoteReserve / baseReserve;
+      
+      // Get or set initial ratio
+      const poolKey = this.config.poolAddress.toString();
+      if (!this.previousState[poolKey]?.initialRatio) {
+        this.previousState[poolKey] = {
+          ...this.previousState[poolKey],
+          initialRatio: currentRatio
+        };
+      }
+      
+      const initialRatio = this.previousState[poolKey].initialRatio;
+      
+      // Calculate % change
+      const priceChangePercent = ((currentRatio / initialRatio) - 1) * 100;
+
       return {
-        currentPrice: pool.price || 0,
-        priceChange24h: 0, // Not available from SDK
-        priceChange1h: 0,  // Not available from SDK
-        high24h: 0,        // Not available from SDK
-        low24h: 0,         // Not available from SDK
+        priceChangePercent,
+        initialRatio,
+        currentRatio,
         lastUpdate: new Date()
       };
     } catch (error: any) {
-      if (error?.response?.status === 429 || (error?.message && error.message.includes('429'))) {
-        console.warn('⚠️  Raydium API rate limited (429). Skipping this update.');
-        await new Promise(resolve => setTimeout(resolve, 2000));
+      if (error?.response?.status === 429) {
+        console.warn('⚠️  Rate limited. Skipping update.');
         return null;
       }
-      console.error('Error fetching pool price:', error?.message || error);
+      console.error('Error updating price:', error?.message || error);
       return null;
     }
   }

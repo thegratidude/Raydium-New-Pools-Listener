@@ -4,6 +4,9 @@ import { startConnection } from './scripts/new-raydium-pools/listener';
 import { Connection, PublicKey } from '@solana/web3.js';
 import * as dotenv from 'dotenv';
 import { execSync } from 'child_process';
+import { Logger } from '@nestjs/common';
+import * as express from 'express';
+import { SocketService } from './gateway/socket.service';
 
 // Kill any process using port 5001 (macOS/Linux only)
 try {
@@ -38,11 +41,22 @@ export const rpcConnection = new Connection(HTTP_URL, {
 });
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule, { 
+  const logger = new Logger('Bootstrap');
+  const expressApp = express();
+  
+  const app = await NestFactory.create(AppModule, {
+    // Disable the built-in HTTP server since we're using our own
+    bodyParser: true,
     cors: true,
-    // Enable hybrid application (HTTP + WebSocket)
-    logger: ['error', 'warn', 'log', 'debug', 'verbose'],
+    logger: ['error', 'warn', 'log'], // Only show error, warn, and log levels
   });
+
+  // Get the SocketService and set the Express app before app.init()
+  const socketService = app.get(SocketService);
+  socketService.setExpressApp(expressApp);
+
+  // Configure minimal logging
+  app.useLogger(new Logger('App'));
 
   const corsOptions = {
     origin: '*',
@@ -54,11 +68,16 @@ async function bootstrap() {
 
   app.enableCors(corsOptions);
 
-  console.log("NestJS app (HTTP + WebSocket) will listen on port 5001");
+  // Initialize the application and wait for all modules to be ready
+  await app.init();
+  
+  logger.log('Application ready');
 
-  await app.listen(5001);
-  // Start the pool listener in parallel (do not await, so both run at the same time)
-  startConnection(rpcConnection, RAYDIUM, INSTRUCTION_NAME).catch(console.error);
+  // Start the pool listener with the app instance
+  await startConnection(app, rpcConnection, RAYDIUM, INSTRUCTION_NAME);
+
+  // Keep the application running
+  await app.listen(0); // Listen on a random port since we're using our own HTTP server
 }
 
 bootstrap();

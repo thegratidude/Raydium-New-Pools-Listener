@@ -56,11 +56,9 @@ export interface TradeActivity {
  * Represents the current price state of the pool
  */
 export interface PriceState {
-  currentPrice: number;
-  priceChange24h: number;
-  priceChange1h: number;
-  high24h: number;
-  low24h: number;
+  priceChangePercent: number;  // % change since monitoring started
+  initialRatio: number;        // Initial reserve ratio
+  currentRatio: number;        // Current reserve ratio
   lastUpdate: Date;
 }
 

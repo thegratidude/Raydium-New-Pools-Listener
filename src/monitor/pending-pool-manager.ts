@@ -13,31 +13,23 @@ export interface PendingPool {
 }
 
 export class PendingPoolManager {
-  private pools: Map<string, PendingPool> = new Map();
-  private checkInterval: number;
-  private maxAttempts: number;
-  private connection: Connection;
-  private logger = new Logger(PendingPoolManager.name);
-  private poolMonitorService: PoolMonitorService;
-  private intervalId: NodeJS.Timeout | null = null;
+  private readonly logger = new Logger(PendingPoolManager.name);
+  private pendingPools: Map<string, PendingPool> = new Map();
+  private checkInterval: NodeJS.Timeout | null = null;
+  private readonly CHECK_INTERVAL = 1000; // 1 second
+  private readonly MAX_ATTEMPTS = 1800; // 30 minutes
+  private readonly MAX_ATTEMPTS_READY = 300; // 5 minutes for ready pools
 
   constructor(
-    connection: Connection,
-    poolMonitorService: PoolMonitorService,
-    options: {
-      checkInterval?: number;
-      maxAttempts?: number;
-    } = {}
+    private readonly connection: Connection,
+    private readonly poolMonitorService: PoolMonitorService
   ) {
-    this.connection = connection;
-    this.poolMonitorService = poolMonitorService;
-    this.checkInterval = options.checkInterval || 30_000; // 30 seconds default
-    this.maxAttempts = options.maxAttempts || 30; // 30 attempts default
+    this.logger.log('PendingPoolManager initialized');
   }
 
   addPool(poolId: string, tokenA: string, tokenB: string) {
     this.logger.log(`Adding pool ${poolId} to pending list`);
-    this.pools.set(poolId, {
+    this.pendingPools.set(poolId, {
       poolId,
       tokenA,
       tokenB,
@@ -49,23 +41,23 @@ export class PendingPoolManager {
   }
 
   private start() {
-    if (!this.intervalId) {
-      this.intervalId = setInterval(() => this.checkPools(), this.checkInterval);
+    if (!this.checkInterval) {
+      this.checkInterval = setInterval(() => this.checkPools(), this.CHECK_INTERVAL);
       this.logger.log('Started checking pending pools');
     }
   }
 
   stop() {
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
+    if (this.checkInterval) {
+      clearInterval(this.checkInterval);
+      this.checkInterval = null;
       this.logger.log('Stopped checking pending pools');
     }
   }
 
   private async checkPools() {
     const now = Date.now();
-    const pending = Array.from(this.pools.values()).filter(p => p.state === 'pending');
+    const pending = Array.from(this.pendingPools.values()).filter(p => p.state === 'pending');
     if (pending.length === 0) {
       this.stop();
       return;
@@ -93,21 +85,21 @@ export class PendingPoolManager {
         pool.state = 'indexed';
         this.logger.log(`Pool ${pool.poolId} is now indexed, notifying PoolMonitorService`);
         this.poolMonitorService.handlePoolReady(pool);
-        this.pools.delete(pool.poolId);
-      } else if (pool.attempts >= this.maxAttempts) {
+        this.pendingPools.delete(pool.poolId);
+      } else if (pool.attempts >= this.MAX_ATTEMPTS) {
         pool.state = 'failed';
         pool.error = 'Not found after max attempts';
-        this.logger.warn(`Pool ${pool.poolId} failed after ${this.maxAttempts} attempts`);
-        this.pools.delete(pool.poolId);
+        this.logger.warn(`Pool ${pool.poolId} failed after ${this.MAX_ATTEMPTS} attempts`);
+        this.pendingPools.delete(pool.poolId);
       }
     });
   }
 
   getPendingPools() {
-    return Array.from(this.pools.values());
+    return Array.from(this.pendingPools.values());
   }
 
   public removePool(poolId: string) {
-    this.pools.delete(poolId);
+    this.pendingPools.delete(poolId);
   }
 } 

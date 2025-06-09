@@ -44,28 +44,11 @@ export class PoolMonitorService implements OnModuleInit {
     const tokenAInfo = MINT_TO_TOKEN[pool.tokenA] || { symbol: pool.tokenA, decimals: 9, mint: pool.tokenA };
     const tokenBInfo = MINT_TO_TOKEN[pool.tokenB] || { symbol: pool.tokenB, decimals: 6, mint: pool.tokenB };
     
-    this.poolMonitorManager.addPool(
-      {
-        poolId: pool.poolId,
-        baseMint: pool.tokenA,
-        quoteMint: pool.tokenB,
-        lpMint: '',
-        isViable: true
-      },
-      tokenAInfo,
-      tokenBInfo,
-      (snapshot, pressure: MarketPressure, originPrice, originBaseReserve, originQuoteReserve) => conciseOnUpdate(
-        snapshot,
-        pressure,
-        tokenAInfo,
-        tokenBInfo,
-        originPrice,
-        originBaseReserve,
-        originQuoteReserve,
-        null,
-        pool.poolId
-      )
-    );
+    this.poolMonitorManager.addPool({
+      poolId: pool.poolId,
+      tokenA: tokenAInfo,
+      tokenB: tokenBInfo
+    });
   }
 
   public async handlePoolReady(pool: PendingPool) {

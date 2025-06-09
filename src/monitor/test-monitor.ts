@@ -1,55 +1,70 @@
-import { config } from 'dotenv';
-config();
+import { Connection } from '@solana/web3.js';
 import { PoolMonitorManager } from './pool-monitor-manager';
-import fetch from 'node-fetch';
+import { PoolSnapshot, MarketPressure, PoolInfo, TokenInfo } from './types';
+import * as dotenv from 'dotenv';
+
+dotenv.config();
 
 const HTTP_URL = process.env.HTTP_URL!;
 const WSS_URL = process.env.WSS_URL!;
 
-// Example Raydium SOL/USDC pool (replace with any pool for live test)
-const poolDiscoveryResult = {
+// Create connection
+const connection = new Connection(HTTP_URL);
+
+// Create manager with connection
+const manager = new PoolMonitorManager(connection, undefined);
+
+// Test pool info
+const TEST_POOL_INFO: PoolInfo = {
   poolId: '58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2',
   baseMint: 'So11111111111111111111111111111111111111112',
-  quoteMint: 'EPjFWdd5AufqSSqeM2qAqAqAqAqAqAqAqAqAqAqAqAqA',
+  quoteMint: 'EPjFWdd5AufqSSqeM2qAqAqAqAqAqAqAqAqAqAqAqA',
   lpMint: '',
-  isViable: true,
+  isViable: true
 };
 
-const tokenA = { symbol: 'SOL', decimals: 9, mint: poolDiscoveryResult.baseMint };
-const tokenB = { symbol: 'USDC', decimals: 6, mint: poolDiscoveryResult.quoteMint };
+// Token info
+const BASE_TOKEN: TokenInfo = {
+  mint: 'So11111111111111111111111111111111111111112',
+  symbol: 'SOL',
+  decimals: 9
+};
 
-const manager = new PoolMonitorManager({ httpUrl: HTTP_URL, wssUrl: WSS_URL });
+const QUOTE_TOKEN: TokenInfo = {
+  mint: 'EPjFWdd5AufqSSqeM2qAqAqAqAqAqAqAqAqAqAqAqA',
+  symbol: 'USDC',
+  decimals: 6
+};
 
-let solPrice = 0;
+// Simple update callback
+function onUpdate(
+  snapshot: PoolSnapshot,
+  pressure: MarketPressure,
+  originPrice: number | null,
+  originBaseReserve: number | null,
+  originQuoteReserve: number | null,
+  prevSnapshot: PoolSnapshot | null,
+  poolId: string
+) {
+  console.log(`Pool ${poolId} update:`);
+  console.log(`Price: ${snapshot.price} (${originPrice ? ((snapshot.price - originPrice) / originPrice * 100).toFixed(2) + '%' : 'N/A'} from origin)`);
+  console.log(`TVL: ${snapshot.tvl}`);
+  console.log(`Volume 24h: ${snapshot.volume24h}`);
+  console.log(`Buy Pressure: ${pressure.buyPressure}`);
+  console.log(`Sell Pressure: ${pressure.sellPressure}`);
+  console.log(`Rug Risk: ${pressure.rugRisk}`);
+  console.log(`Trend: ${pressure.trend}`);
+  console.log('---');
+}
 
-async function updateSolPrice() {
+async function testMonitor() {
   try {
-    const res = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
-    const data = (await res.json()) as any;
-    solPrice = data.solana.usd;
-  } catch (e) {
-    solPrice = 0;
+    console.log('Starting test monitor...');
+    await manager.addPool({ poolId: TEST_POOL_INFO.poolId, tokenA: BASE_TOKEN, tokenB: QUOTE_TOKEN });
+    console.log('Pool added to monitor');
+  } catch (error) {
+    console.error('Error in test monitor:', error);
   }
 }
 
-updateSolPrice();
-setInterval(updateSolPrice, 60_000); // Update every minute
-
-function formatUSD(n: number) {
-  return n.toLocaleString('en-US', { maximumFractionDigits: 0, minimumFractionDigits: 0 });
-}
-
-manager.addPool(poolDiscoveryResult, tokenA, tokenB, (snapshot, pressure) => {
-  // Convert reserves to USD
-  const baseUSD = tokenA.symbol === 'SOL' ? snapshot.baseReserve * solPrice : snapshot.baseReserve;
-  const quoteUSD = tokenB.symbol === 'SOL' ? snapshot.quoteReserve * solPrice : snapshot.quoteReserve;
-  // Concise output: SYMBOLS | Price | TVL | Base($) | Quote($) | BuyP | Rug | Trend
-  console.log(
-    `${tokenA.symbol}/${tokenB.symbol} | $${snapshot.price.toFixed(4)} | TVL $${formatUSD(snapshot.tvl)} | ` +
-    `Base $${formatUSD(baseUSD)} | Quote $${formatUSD(quoteUSD)} | ` +
-    `BuyP ${pressure.buyPressure} | Rug ${pressure.rugRisk} | ${pressure.trend}`
-  );
-});
-
-// Keep process alive
-process.stdin.resume(); 
+testMonitor().catch(console.error); 

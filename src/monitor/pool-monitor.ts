@@ -1,15 +1,14 @@
-import { Connection, PublicKey } from '@solana/web3.js';
+import { Connection, PublicKey, AccountInfo } from '@solana/web3.js';
 import { PoolSnapshot, MarketPressure, TrendDirection } from './types';
 import { DecimalHandler, ReserveMath } from './utils';
-import BN from 'bn.js';
+import { BN } from '@coral-xyz/anchor';
 import { Api } from '@raydium-io/raydium-sdk-v2';
 import { insertPoolHistory } from './pool-history-db';
-
-interface TokenInfo {
-  symbol: string;
-  decimals: number;
-  mint: string;
-}
+import { struct, nu64, blob, Layout } from '@solana/buffer-layout';
+import { getRaydiumRoundTripQuote } from '../raydium/quoteRaydium';
+import { TokenInfo } from '../types/token';
+import { LIQUIDITY_STATE_LAYOUT_V4 } from './raydium-layout';
+import { AccountInfo as TokenAccountInfo } from '@solana/web3.js';
 
 interface PoolMonitorOptions {
   poolId: string;
@@ -21,154 +20,367 @@ interface PoolMonitorOptions {
   historyLength?: number;
 }
 
+interface PoolState {
+  status: BN;
+  nonce: BN;
+  maxOrder: BN;
+  depth: BN;
+  baseDecimal: BN;
+  quoteDecimal: BN;
+  state: BN;
+  resetFlag: BN;
+  minSize: BN;
+  volMaxCutRatio: BN;
+  amountWaveRatio: BN;
+  baseLotSize: BN;
+  quoteLotSize: BN;
+  minPriceMultiplier: BN;
+  maxPriceMultiplier: BN;
+  systemDecimalValue: BN;
+  minSeparateNumerator: BN;
+  minSeparateDenominator: BN;
+  tradeFeeNumerator: BN;
+  tradeFeeDenominator: BN;
+  pnlNumerator: BN;
+  pnlDenominator: BN;
+  swapFeeNumerator: BN;
+  swapFeeDenominator: BN;
+  baseNeedTakePnl: BN;
+  quoteNeedTakePnl: BN;
+  quoteTotalPnl: BN;
+  baseTotalPnl: BN;
+  poolOpenTime: BN;
+  punishPcAmount: BN;
+  punishCoinAmount: BN;
+  orderbookToInitTime: BN;
+  swapBaseInAmount: BN;
+  swapQuoteOutAmount: BN;
+  swapBase2QuoteFee: BN;
+  swapQuoteInAmount: BN;
+  swapBaseOutAmount: BN;
+  swapQuote2BaseFee: BN;
+  baseMint: Buffer;
+  quoteMint: Buffer;
+  lpMint: Buffer;
+  openOrders: Buffer;
+  marketId: Buffer;
+  marketProgramId: Buffer;
+  targetOrders: Buffer;
+  withdrawQueue: Buffer;
+  lpVault: Buffer;
+  owner: Buffer;
+  lpReserve: Buffer;
+  baseVault: Buffer;
+  quoteVault: Buffer;
+}
+
+interface DecodedPoolState {
+  status: number;
+  nonce: number;
+  maxOrder: number;
+  depth: number;
+  baseDecimal: number;
+  quoteDecimal: number;
+  state: number;
+  resetFlag: number;
+  minSize: number;
+  volMaxCutRatio: number;
+  amountWaveRatio: number;
+  baseLotSize: number;
+  quoteLotSize: number;
+  minPriceMultiplier: number;
+  maxPriceMultiplier: number;
+  systemDecimalValue: number;
+  minSeparateNumerator: number;
+  minSeparateDenominator: number;
+  tradeFeeNumerator: number;
+  tradeFeeDenominator: number;
+  pnlNumerator: number;
+  pnlDenominator: number;
+  swapFeeNumerator: number;
+  swapFeeDenominator: number;
+  baseNeedTakePnl: number;
+  quoteNeedTakePnl: number;
+  quoteTotalPnl: number;
+  baseTotalPnl: number;
+  poolOpenTime: number;
+  punishPcAmount: number;
+  punishCoinAmount: number;
+  orderbookToInitTime: number;
+  swapBaseInAmount: number;
+  swapQuoteOutAmount: number;
+  swapBase2QuoteFee: number;
+  swapQuoteInAmount: number;
+  swapBaseOutAmount: number;
+  swapQuote2BaseFee: number;
+  baseMint: Buffer;
+  quoteMint: Buffer;
+  lpMint: Buffer;
+  openOrders: Buffer;
+  marketId: Buffer;
+  marketProgramId: Buffer;
+  targetOrders: Buffer;
+  withdrawQueue: Buffer;
+  lpVault: Buffer;
+  owner: Buffer;
+  lpReserve: Buffer;
+  baseVault: Buffer;
+  quoteVault: Buffer;
+}
+
+// Define the Raydium pool state interface with proper types
+interface RaydiumPoolState {
+  status: number;
+  nonce: number;
+  maxOrder: number;
+  depth: number;
+  baseDecimal: number;
+  quoteDecimal: number;
+  state: number;
+  resetFlag: number;
+  minSize: number;
+  volMaxCutRatio: number;
+  amountWaveRatio: number;
+  baseLotSize: number;
+  quoteLotSize: number;
+  minPriceMultiplier: number;
+  maxPriceMultiplier: number;
+  systemDecimalValue: number;
+  minSeparateNumerator: number;
+  minSeparateDenominator: number;
+  tradeFeeNumerator: number;
+  tradeFeeDenominator: number;
+  pnlNumerator: number;
+  pnlDenominator: number;
+  swapFeeNumerator: number;
+  swapFeeDenominator: number;
+  baseNeedTakePnl: number;
+  quoteNeedTakePnl: number;
+  quoteTotalPnl: number;
+  baseTotalPnl: number;
+  poolOpenTime: number;
+  punishPcAmount: number;
+  punishCoinAmount: number;
+  orderbookToInitTime: number;
+  swapBaseInAmount: number;
+  swapQuoteOutAmount: number;
+  swapBase2QuoteFee: number;
+  swapQuoteInAmount: number;
+  swapBaseOutAmount: number;
+  swapQuote2BaseFee: number;
+  baseMint: Uint8Array;
+  quoteMint: Uint8Array;
+  lpMint: Uint8Array;
+  openOrders: Uint8Array;
+  marketId: Uint8Array;
+  marketProgramId: Uint8Array;
+  targetOrders: Uint8Array;
+  withdrawQueue: Uint8Array;
+  lpVault: Uint8Array;
+  owner: Uint8Array;
+  lpReserve: Uint8Array;
+  baseVault: Uint8Array;
+  quoteVault: Uint8Array;
+}
+
+// Add these constants at the top of the file
+const SYSTEM_PROGRAM_ID = new PublicKey('11111111111111111111111111111111');
+const NATIVE_LOADER_ID = new PublicKey('NativeLoader1111111111111111111111111111111');
+const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+const WSOL_MINTS = [
+  new PublicKey('So11111111111111111111111111111111111111112'),  // WSOL
+  new PublicKey('111111119oo283CdQsvQBaZZxTsAZAAs18Kkyrw75'),   // Alternative WSOL mint
+  new PublicKey('7XSzQZQ2E1V9DqgW8sELpAo7P5NdVs4KJc4uFfQk5o4h'), // Another WSOL variant
+  new PublicKey('111111118P3EVhM3gob9bdkRDaGo7tZhVKkVG9koR'),    // Another native SOL variant
+  new PublicKey('11111111AnVezkofwHK1nxnKEJcKpSiQDKmqaVY6K'),    // Another native SOL variant
+  new PublicKey('11111111FmjkjEUjfJDA9RiEm92pWEhTfhEsLYUjh')     // Another native SOL variant
+];
+
+// Types
+export interface PoolUpdate {
+  poolId: string;
+  baseToken: TokenInfo;
+  quoteToken: TokenInfo;
+  baseReserve: number;
+  quoteReserve: number;
+  timestamp: number;
+}
+
+// Helper function to decode pool state
+function decodePoolState(data: Buffer) {
+  try {
+    const decoded = LIQUIDITY_STATE_LAYOUT_V4.decode(data);
+    return {
+      baseMint: new PublicKey(decoded.baseMint),
+      quoteMint: new PublicKey(decoded.quoteMint),
+      baseVault: new PublicKey(decoded.baseVault),
+      quoteVault: new PublicKey(decoded.quoteVault)
+    };
+  } catch (error) {
+    console.error('Failed to decode pool state:', error);
+    return null;
+  }
+}
+
 export class PoolMonitor {
   private connection: Connection;
-  private poolId: string;
+  private poolId: PublicKey;
   private tokenA: TokenInfo;
   private tokenB: TokenInfo;
-  private onUpdate: (snapshot: PoolSnapshot, pressure: MarketPressure, originPrice: number | null, originBaseReserve: number | null, originQuoteReserve: number | null, prevSnapshot: PoolSnapshot | null) => void;
-  private history: PoolSnapshot[] = [];
-  private readonly HISTORY_LENGTH: number;
-  private subscriptionId: number | null = null;
-  private firstSnapshotTimestamp: number | null = null;
-  private originPrice: number | null = null;
-  private originBaseReserve: number | null = null;
-  private originQuoteReserve: number | null = null;
-  private dbWriteTimer: NodeJS.Timeout | null = null;
-  private prevSnapshot: PoolSnapshot | null = null;
+  private onUpdate: (update: PoolUpdate) => void;
+  private isSimulation: boolean;
+  private lastUpdate: number = 0;
+  private updateInterval: number = 5000; // 5 seconds between updates
+  private initialReserveRatio: number | null = null; // Track initial reserve ratio
 
-  constructor(options: PoolMonitorOptions) {
+  constructor(options: {
+    poolId: PublicKey;
+    tokenA: TokenInfo;
+    tokenB: TokenInfo;
+    httpUrl: string;
+    wssUrl: string;
+    onUpdate: (update: PoolUpdate) => void;
+    isSimulation?: boolean;
+  }) {
+    this.connection = new Connection(options.httpUrl, {
+      wsEndpoint: options.wssUrl,
+      commitment: 'confirmed'
+    });
     this.poolId = options.poolId;
     this.tokenA = options.tokenA;
     this.tokenB = options.tokenB;
     this.onUpdate = options.onUpdate;
-    this.HISTORY_LENGTH = options.historyLength || 50;
-    this.connection = new Connection(options.httpUrl, { wsEndpoint: options.wssUrl });
+    this.isSimulation = options.isSimulation || false;
   }
 
   async start() {
-    console.log(`[PoolMonitor] STARTED monitoring for pool: ${this.tokenA.symbol}/${this.tokenB.symbol} (${this.poolId})`);
-    // Initial fetch for state
-    const initialSnapshot = await this.getPoolSnapshot();
-    if (initialSnapshot) {
-      this.history.push(initialSnapshot);
-      if (this.originPrice === null) {
-        this.originPrice = initialSnapshot.price;
-        this.originBaseReserve = initialSnapshot.baseReserve;
-        this.originQuoteReserve = initialSnapshot.quoteReserve;
-      }
-      this.onUpdate(initialSnapshot, this.analyzeMarketPressure(initialSnapshot), this.originPrice, this.originBaseReserve, this.originQuoteReserve, null);
-      this.prevSnapshot = initialSnapshot;
-    }
-    // Subscribe to state changes
-    this.subscriptionId = this.connection.onAccountChange(
-      new PublicKey(this.poolId),
-      async (accountInfo, context) => {
-        try {
-          const snapshot = await this.processPoolUpdate(accountInfo.data, context.slot);
-          if (snapshot) {
-            if (this.originPrice === null) {
-              this.originPrice = snapshot.price;
-              this.originBaseReserve = snapshot.baseReserve;
-              this.originQuoteReserve = snapshot.quoteReserve;
-            }
-            const pressure = this.analyzeMarketPressure(snapshot);
-            this.onUpdate(snapshot, pressure, this.originPrice, this.originBaseReserve, this.originQuoteReserve, this.prevSnapshot);
-            this.prevSnapshot = snapshot;
-          }
-        } catch (e) {
-          console.error(`[PoolMonitor] Error processing update:`, e);
-        }
-      },
-      'confirmed'
-    );
+    console.log(`[PoolMonitor] STARTED monitoring for pool: ${this.tokenA.symbol}/${this.tokenB.symbol} (${this.poolId.toBase58()})`);
+    
+    // Initial update
+    await this.processPoolUpdate();
+
+    // Set up periodic updates
+    setInterval(async () => {
+      await this.processPoolUpdate();
+    }, this.updateInterval);
   }
 
-  async stop() {
-    console.log(`[PoolMonitor] STOPPED monitoring for pool: ${this.tokenA.symbol}/${this.tokenB.symbol} (${this.poolId})`);
-    if (this.subscriptionId !== null) {
-      this.connection.removeAccountChangeListener(this.subscriptionId);
-      this.subscriptionId = null;
-    }
-  }
-
-  private async getPoolSnapshot(): Promise<PoolSnapshot | null> {
+  private async processPoolUpdate() {
     try {
-      const accountInfo = await this.connection.getAccountInfo(new PublicKey(this.poolId));
-      if (!accountInfo) return null;
-      return this.processPoolUpdate(accountInfo.data, 0);
-    } catch (e) {
-      console.error(`[PoolMonitor] Error fetching initial state:`, e);
-      return null;
+      const response = await this.connection.getAccountInfoAndContext(this.poolId);
+      if (!response.value) {
+        console.error(`Pool ${this.poolId.toString()} not found`);
+        return;
+      }
+
+      const poolState = decodePoolState(response.value.data);
+      if (!poolState) return;
+
+      // Get vault balances
+      const [baseVaultInfo, quoteVaultInfo] = await Promise.all([
+        this.connection.getTokenAccountBalance(poolState.baseVault),
+        this.connection.getTokenAccountBalance(poolState.quoteVault)
+      ]);
+
+      if (!baseVaultInfo.value || !quoteVaultInfo.value) return;
+
+      const baseReserve = baseVaultInfo.value.uiAmount || 0;
+      const quoteReserve = quoteVaultInfo.value.uiAmount || 0;
+      
+      // Calculate reserve ratio
+      const reserveRatio = quoteReserve / baseReserve;
+      
+      // Set initial ratio if not set
+      if (this.initialReserveRatio === null) {
+        this.initialReserveRatio = reserveRatio;
+      }
+
+      // Calculate ratio change percentage
+      const ratioChange = ((reserveRatio - this.initialReserveRatio) / this.initialReserveRatio) * 100;
+
+      // Calculate price using reserve ratio
+      const price = reserveRatio;
+
+      const snapshot: PoolSnapshot = {
+        poolId: this.poolId.toString(),
+        timestamp: Date.now(),
+        slot: response.context.slot,
+        baseReserve,
+        quoteReserve,
+        price,
+        priceChange: ratioChange,
+        tvl: quoteReserve * 2,
+        marketCap: 0,
+        volumeChange: 0,
+        volume24h: 0,
+        suspicious: false,
+        baseDecimals: baseVaultInfo.value.decimals,
+        quoteDecimals: quoteVaultInfo.value.decimals,
+        buySlippage: 0,
+        sellSlippage: 0,
+        reserveRatio,
+        initialReserveRatio: this.initialReserveRatio,
+        ratioChange
+      };
+
+      // Calculate market pressure based on ratio changes
+      const pressure = this.calculateMarketPressure(snapshot);
+
+      // Call update callback
+      this.onUpdate({
+        poolId: this.poolId.toString(),
+        baseToken: this.tokenA,
+        quoteToken: this.tokenB,
+        baseReserve,
+        quoteReserve,
+        timestamp: Date.now()
+      });
+
+      // Store in history with required fields
+      await insertPoolHistory({
+        poolId: snapshot.poolId,
+        baseSymbol: this.tokenA.symbol,
+        quoteSymbol: this.tokenB.symbol,
+        timestamp: snapshot.timestamp,
+        price: snapshot.price,
+        tvl: snapshot.tvl,
+        baseReserve: snapshot.baseReserve,
+        quoteReserve: snapshot.quoteReserve,
+        buyPressure: pressure.buyPressure,
+        rugRisk: pressure.rugRisk,
+        trend: pressure.trend,
+        volume: snapshot.volume24h
+      });
+
+    } catch (error) {
+      console.error('Error processing pool update:', error);
     }
   }
 
-  private async processPoolUpdate(data: Buffer, slot: number): Promise<PoolSnapshot | null> {
-    // For now, assume Raydium V4 layout and fetch reserves from vaults
-    // (In a full implementation, decode the pool state for vault addresses)
-    // Here, we assume poolId is the state account and vaults are known
-    // TODO: Replace with actual vault fetching logic
-    const baseReserve = Math.random() * 10000 + 50000; // Simulated
-    const quoteReserve = Math.random() * 10000 + 50000; // Simulated
-    const price = ReserveMath.calculatePrice(baseReserve, quoteReserve);
-    const previous = this.history[this.history.length - 1];
-    const priceChange = previous ? ((price - previous.price) / previous.price) * 100 : 0;
-    const tvl = quoteReserve * 2;
-    const marketCap = price * 1000000; // Placeholder
-    const volumeChange = previous ? Math.abs(baseReserve - previous.baseReserve) : 0;
-    const suspicious = false; // Placeholder
+  private calculateMarketPressure(snapshot: PoolSnapshot): MarketPressure {
+    const ratioChange = snapshot.ratioChange;
+    
+    // Determine trend direction
+    let trend: TrendDirection = TrendDirection.Sideways;
+    if (ratioChange > 1) trend = TrendDirection.Up;
+    else if (ratioChange < -1) trend = TrendDirection.Down;
 
-    // Fetch 24h volume from Raydium SDK
-    let volume24h = 0;
-    try {
-      const api = new Api({ cluster: 'mainnet', timeout: 30000 });
-      const poolInfo = await api.fetchPoolById({ ids: this.poolId });
-      if (Array.isArray(poolInfo) && poolInfo.length > 0 && poolInfo[0]) {
-        volume24h = poolInfo[0].day?.volume || 0;
-      }
-    } catch (e) {
-      // If Raydium API fails, leave volume24h as 0
-    }
+    // Calculate pressure values
+    const buyPressure = ratioChange > 0 ? Math.min(100, 50 + (ratioChange * 10)) : Math.max(0, 50 - (Math.abs(ratioChange) * 10));
+    const sellPressure = ratioChange < 0 ? Math.min(100, 50 + (Math.abs(ratioChange) * 10)) : Math.max(0, 50 - (ratioChange * 10));
+    
+    // Calculate rug risk based on ratio changes
+    const rugRisk = ratioChange < -80 ? 100 : Math.max(0, Math.abs(ratioChange) * 1.25);
 
-    const snapshot: PoolSnapshot = {
-      poolId: this.poolId,
-      timestamp: Date.now(),
-      slot,
-      baseReserve,
-      quoteReserve,
-      price,
-      priceChange,
-      tvl,
-      marketCap,
-      volumeChange,
-      volume24h,
-      suspicious,
+    return {
+      value: ratioChange,
+      direction: trend,
+      strength: Math.abs(ratioChange),
+      buyPressure,
+      sellPressure,
+      rugRisk,
+      trend,
+      severity: rugRisk > 70 ? 'high' : rugRisk > 30 ? 'medium' : 'low'
     };
-    this.history.push(snapshot);
-    if (this.history.length > this.HISTORY_LENGTH) this.history.shift();
-
-    return snapshot;
-  }
-
-  private analyzeMarketPressure(current: PoolSnapshot): MarketPressure {
-    if (this.history.length < 2) {
-      return { buyPressure: 50, sellPressure: 50, rugRisk: 0, trend: TrendDirection.Sideways };
-    }
-    const previous = this.history[this.history.length - 2];
-    const priceChange = current.priceChange;
-    let buyPressure = 50;
-    let sellPressure = 50;
-    if (priceChange > 0) {
-      buyPressure = Math.min(100, 50 + priceChange * 10);
-      sellPressure = Math.max(0, 50 - priceChange * 10);
-    } else {
-      sellPressure = Math.min(100, 50 + Math.abs(priceChange) * 10);
-      buyPressure = Math.max(0, 50 - Math.abs(priceChange) * 10);
-    }
-    // Rug risk: placeholder logic
-    const rugRisk = Math.abs(current.priceChange) > 20 ? 60 : 10;
-    // Trend
-    const trend = priceChange > 0.1 ? TrendDirection.Up : priceChange < -0.1 ? TrendDirection.Down : TrendDirection.Sideways;
-    return { buyPressure, sellPressure, rugRisk, trend };
   }
 } 

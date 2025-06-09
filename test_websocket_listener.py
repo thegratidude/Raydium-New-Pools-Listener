@@ -172,12 +172,13 @@ async def connect_to_server():
 if __name__ == "__main__":
     try:
         print(f"{Fore.BLUE}Starting Raydium Pool Listener...{Style.RESET_ALL}")
-        print(f"{Fore.BLUE}Press Ctrl+C to stop{Style.RESET_ALL}")
-        print(f"{Fore.BLUE}Messages will be logged to: {MESSAGE_LOG_FILE}{Style.RESET_ALL}")
+        # print(f"{Fore.BLUE}Press Ctrl+C to stop{Style.RESET_ALL}")
+        # print(f"{Fore.BLUE}Messages will be logged to: {MESSAGE_LOG_FILE}{Style.RESET_ALL}")
         asyncio.run(connect_to_server())
     except KeyboardInterrupt:
-        print(f"\n{Fore.YELLOW}Listener stopped by user{Style.RESET_ALL}")
+        # print(f"\n{Fore.YELLOW}Listener stopped by user{Style.RESET_ALL}")
+        pass
     finally:
         if sio.connected:
             asyncio.run(sio.disconnect())
-        print(f"{Fore.GREEN}Cleanup complete. Goodbye!{Style.RESET_ALL}") 
+        # print(f"{Fore.GREEN}Cleanup complete. Goodbye!{Style.RESET_ALL}") 
