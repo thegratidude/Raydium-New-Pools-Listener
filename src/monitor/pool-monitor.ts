@@ -14,13 +14,13 @@ import { createMarketPressure } from '../types/market';
 import { Logger } from '@nestjs/common';
 
 interface PoolMonitorOptions {
-  poolId: string;
+  poolId: PublicKey;
   tokenA: TokenInfo;
   tokenB: TokenInfo;
   httpUrl: string;
   wssUrl: string;
-  onUpdate: (snapshot: PoolSnapshot, pressure: MarketPressure, originPrice: number | null, originBaseReserve: number | null, originQuoteReserve: number | null, prevSnapshot: PoolSnapshot | null) => void;
-  historyLength?: number;
+  onUpdate: (update: PoolUpdate) => void;
+  isSimulation?: boolean;
 }
 
 interface PoolState {
@@ -226,32 +226,25 @@ export class PoolMonitor {
   private onUpdate: (update: PoolUpdate) => void;
   private isSimulation: boolean;
   private lastUpdate: number = 0;
-  private updateInterval: number = 5000;
+  private updateInterval: number = 1000; // Reduced to 1 second for faster detection
   private initialReserveRatio: number | null = null;
   private retryCount: number = 0;
   private readonly MAX_RETRIES = 5;
   private readonly RETRY_DELAY = 2000;
   private readonly MAX_RETRY_DELAY = 32000;
   private hasSeenTrade: boolean = false;
-  private subscriptionId: number | null = null;
-  private readonly RAYDIUM_PROGRAM_ID = new PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8');
-  private tradeCount: number = 0;
-  private readonly TRADE_THRESHOLD = 2; // Notify after seeing 2 trades
-  private readonly TRADE_WINDOW = 30000; // 30 seconds window to observe trades
-  private firstTradeTime: number | null = null;
-  private initialBaseReserve: number | null = null;
-  private initialQuoteReserve: number | null = null;
+  private intervalId: NodeJS.Timeout | null = null;
   private readonly logger = new Logger(PoolMonitor.name);
+  
+  // Reserve tracking for change detection
+  private lastBaseReserve: number | null = null;
+  private lastQuoteReserve: number | null = null;
+  private firstTradeTime: number | null = null;
+  private tradeCount: number = 0;
+  private readonly TRADE_THRESHOLD = 1; // Ready after first reserve change
+  private readonly TRADE_WINDOW = 30000; // 30 seconds window
 
-  constructor(options: {
-    poolId: PublicKey;
-    tokenA: TokenInfo;
-    tokenB: TokenInfo;
-    httpUrl: string;
-    wssUrl: string;
-    onUpdate: (update: PoolUpdate) => void;
-    isSimulation?: boolean;
-  }) {
+  constructor(options: PoolMonitorOptions) {
     this.connection = new Connection(options.httpUrl, {
       wsEndpoint: options.wssUrl,
       commitment: 'confirmed'
@@ -266,303 +259,165 @@ export class PoolMonitor {
   async start() {
     this.logger.log(`Started monitoring for pool: ${this.tokenA.symbol}/${this.tokenB.symbol} (${this.poolId.toBase58()})`);
     
-    // Subscribe to program account changes for swap events
-    this.subscriptionId = this.connection.onProgramAccountChange(
-      this.RAYDIUM_PROGRAM_ID,
-      async (accountInfo, context) => {
-        try {
-          // Check if this is our pool
-          if (!accountInfo.accountId.equals(this.poolId)) return;
-
-          // Decode the pool state
-          const poolState = decodePoolState(accountInfo.accountInfo.data);
-          if (!poolState) return;
-
-          // Check if this is a swap event by looking at the instruction data
-          // Raydium swap instruction discriminator is 9
-          const instructionData = accountInfo.accountInfo.data;
-          if (instructionData[0] === 9) { // Swap instruction
-            this.tradeCount++;
-            
-            // Get current reserves
-            const [baseVaultInfo, quoteVaultInfo] = await this.getVaultBalancesWithRetry(poolState);
-            if (baseVaultInfo && quoteVaultInfo) {
-              const baseReserve = baseVaultInfo.value.uiAmount || 0;
-              const quoteReserve = quoteVaultInfo.value.uiAmount || 0;
-              
-              if (baseReserve > 0) {
-                if (!this.firstTradeTime) {
-                  this.firstTradeTime = Date.now();
-                  this.initialBaseReserve = baseReserve;
-                  this.initialQuoteReserve = quoteReserve;
-                  this.logger.log(`🔥 First trade detected for pool ${this.poolId.toBase58()}`);
-                  this.logger.log(`  Initial reserves: ${baseReserve} ${this.tokenA.symbol} / ${quoteReserve} ${this.tokenB.symbol}`);
-                } else {
-                  const timeSinceFirstTrade = Date.now() - this.firstTradeTime;
-                  
-                  // Calculate reserve changes
-                  const baseReserveChange = Math.abs(((baseReserve - (this.initialBaseReserve || 0)) / (this.initialBaseReserve || 1)) * 100);
-                  const quoteReserveChange = Math.abs(((quoteReserve - (this.initialQuoteReserve || 0)) / (this.initialQuoteReserve || 1)) * 100);
-                  const maxReserveChange = Math.max(baseReserveChange, quoteReserveChange);
-                  
-                  this.logger.log(`Trade #${this.tradeCount} detected (${timeSinceFirstTrade/1000}s since first trade)`);
-                  this.logger.log(`  Reserve changes: ${baseReserveChange.toFixed(2)}% ${this.tokenA.symbol} / ${quoteReserveChange.toFixed(2)}% ${this.tokenB.symbol}`);
-                  
-                  // If we've seen enough trades within our window, notify
-                  if (this.tradeCount >= this.TRADE_THRESHOLD && timeSinceFirstTrade <= this.TRADE_WINDOW) {
-                    this.logger.log(`🎯 Pool ${this.poolId.toBase58()} is ready! Seen ${this.tradeCount} trades in ${(timeSinceFirstTrade/1000).toFixed(1)}s with ${maxReserveChange.toFixed(2)}% max reserve change`);
-                    
-                    this.onUpdate({
-                      pool_id: this.poolId.toString(),
-                      base_token: this.tokenA.symbol,
-                      quote_token: this.tokenB.symbol,
-                      base_reserve: baseReserve,
-                      quote_reserve: quoteReserve,
-                      price: quoteReserve / baseReserve,
-                      tvl: quoteReserve * 2,
-                      market_pressure: this.calculateMarketPressure({
-                        poolId: this.poolId.toString(),
-                        timestamp: Date.now(),
-                        slot: context.slot,
-                        baseReserve: baseReserve,
-                        quoteReserve: quoteReserve,
-                        price: quoteReserve / baseReserve,
-                        priceChange: ((quoteReserve / baseReserve) - (this.initialReserveRatio || 1)) * 100,
-                        tvl: quoteReserve * 2,
-                        marketCap: 0,
-                        volumeChange: 0,
-                        volume24h: 0,
-                        suspicious: false,
-                        baseDecimals: baseVaultInfo.value.decimals,
-                        quoteDecimals: quoteVaultInfo.value.decimals,
-                        buySlippage: 0,
-                        sellSlippage: 0,
-                        reserveRatio: quoteReserve / baseReserve,
-                        initialReserveRatio: this.initialReserveRatio,
-                        ratioChange: ((quoteReserve / baseReserve) - (this.initialReserveRatio || 1)) * 100
-                      }).value,
-                      trade_count: this.tradeCount,
-                      reserve_change_percent: maxReserveChange,
-                      time_since_first_trade: timeSinceFirstTrade,
-                      has_trade_data: true,
-                      timestamp: Date.now()
-                    });
-                  }
-                }
-              }
-            }
-          }
-        } catch (error) {
-          this.logger.error('Error processing program account change:', error);
-        }
-      },
-      'confirmed'
-    );
-
-    // Initial update
+    // Initial state fetch
     await this.processPoolUpdate();
 
-    // Set up periodic updates
-    setInterval(async () => {
+    // Start polling every 1 second
+    this.intervalId = setInterval(async () => {
       await this.processPoolUpdate();
     }, this.updateInterval);
   }
 
   stop() {
-    if (this.subscriptionId !== null) {
-      this.connection.removeProgramAccountChangeListener(this.subscriptionId);
-      this.subscriptionId = null;
+    if (this.intervalId) {
+      clearInterval(this.intervalId);
+      this.intervalId = null;
     }
     this.logger.log(`Stopped monitoring for pool: ${this.poolId.toBase58()}`);
   }
 
   private async processPoolUpdate() {
     try {
-      const response = await this.connection.getAccountInfoAndContext(this.poolId);
-      if (!response.value) {
-        this.logger.error(`Pool ${this.poolId.toString()} not found`);
+      // Use Raydium API for reliable pool data (like the old monitor.ts)
+      const api = new Api({ cluster: 'mainnet', timeout: 30000 });
+      const poolInfo = await api.fetchPoolById({ ids: this.poolId.toBase58() });
+      
+      if (!Array.isArray(poolInfo) || poolInfo.length === 0 || !poolInfo[0]) {
+        // Pool not found or not yet indexed - this is normal for new pools
         return;
       }
 
-      const poolState = decodePoolState(response.value.data);
-      if (!poolState) return;
+      const pool = poolInfo[0];
+      if (!pool.mintA || !pool.mintB) {
+        return;
+      }
 
-      // Get vault balances with retry logic
-      const [baseVaultInfo, quoteVaultInfo] = await this.getVaultBalancesWithRetry(poolState);
-      if (!baseVaultInfo || !quoteVaultInfo) {
-        // If we've exceeded retries, notify the pending pool manager
-        if (this.retryCount >= this.MAX_RETRIES) {
-          this.logger.error(`Failed to get vault balances after ${this.MAX_RETRIES} retries for pool ${this.poolId.toString()}`);
-          return;
+      const baseReserve = pool.mintAmountA || 0;
+      const quoteReserve = pool.mintAmountB || 0;
+      
+      // Check if we have valid reserves
+      if (baseReserve <= 0 || quoteReserve <= 0) {
+        return;
+      }
+
+      // Detect reserve changes (this is the key insight!)
+      const hasReserveChange = this.detectReserveChange(baseReserve, quoteReserve);
+      
+      if (hasReserveChange) {
+        this.tradeCount++;
+        
+        if (!this.firstTradeTime) {
+          this.firstTradeTime = Date.now();
+          this.logger.log(`🔥 First trade detected for pool ${this.poolId.toBase58()}`);
+          this.logger.log(`  Initial reserves: ${baseReserve} ${this.tokenA.symbol} / ${quoteReserve} ${this.tokenB.symbol}`);
+        } else {
+          const timeSinceFirstTrade = Date.now() - this.firstTradeTime;
+          this.logger.log(`Trade #${this.tradeCount} detected (${timeSinceFirstTrade/1000}s since first trade)`);
         }
-        return;
+
+        // Calculate reserve changes
+        const baseReserveChange = this.lastBaseReserve ? 
+          Math.abs(((baseReserve - this.lastBaseReserve) / this.lastBaseReserve) * 100) : 0;
+        const quoteReserveChange = this.lastQuoteReserve ? 
+          Math.abs(((quoteReserve - this.lastQuoteReserve) / this.lastQuoteReserve) * 100) : 0;
+        const maxReserveChange = Math.max(baseReserveChange, quoteReserveChange);
+
+        // If we've seen enough trades within our window, notify
+        if (this.tradeCount >= this.TRADE_THRESHOLD) {
+          const timeSinceFirstTrade = Date.now() - (this.firstTradeTime || 0);
+          
+          if (timeSinceFirstTrade <= this.TRADE_WINDOW) {
+            this.logger.log(`🎯 Pool ${this.poolId.toBase58()} is ready! Seen ${this.tradeCount} trades in ${(timeSinceFirstTrade/1000).toFixed(1)}s with ${maxReserveChange.toFixed(2)}% max reserve change`);
+            
+            this.onUpdate({
+              pool_id: this.poolId.toString(),
+              base_token: this.tokenA.symbol,
+              quote_token: this.tokenB.symbol,
+              base_reserve: baseReserve,
+              quote_reserve: quoteReserve,
+              price: quoteReserve / baseReserve,
+              tvl: quoteReserve * 2,
+              market_pressure: this.calculateMarketPressure({
+                poolId: this.poolId.toString(),
+                timestamp: Date.now(),
+                slot: 0,
+                baseReserve: baseReserve,
+                quoteReserve: quoteReserve,
+                price: quoteReserve / baseReserve,
+                priceChange: 0,
+                tvl: quoteReserve * 2,
+                marketCap: 0,
+                volumeChange: 0,
+                volume24h: pool.day?.volume || 0,
+                suspicious: false,
+                baseDecimals: pool.mintA.decimals || 9,
+                quoteDecimals: pool.mintB.decimals || 6,
+                buySlippage: 0,
+                sellSlippage: 0,
+                reserveRatio: quoteReserve / baseReserve,
+                initialReserveRatio: this.initialReserveRatio,
+                ratioChange: 0
+              }).value,
+              trade_count: this.tradeCount,
+              reserve_change_percent: maxReserveChange,
+              time_since_first_trade: timeSinceFirstTrade,
+              has_trade_data: true,
+              timestamp: Date.now()
+            });
+          }
+        }
       }
 
-      const baseReserve = baseVaultInfo.value.uiAmount || 0;
-      const quoteReserve = quoteVaultInfo.value.uiAmount || 0;
-      
-      // Check if we've seen a trade (reserves have changed)
-      if (!this.hasSeenTrade && (baseReserve > 0 || quoteReserve > 0)) {
-        this.hasSeenTrade = true;
-        // Notify the pending pool manager that we've seen trade data
-        this.onUpdate({
-          pool_id: this.poolId.toString(),
-          base_token: this.tokenA.symbol,
-          quote_token: this.tokenB.symbol,
-          base_reserve: baseReserve,
-          quote_reserve: quoteReserve,
-          price: quoteReserve / baseReserve,
-          tvl: quoteReserve * 2,
-          market_pressure: this.calculateMarketPressure({
-            poolId: this.poolId.toString(),
-            timestamp: Date.now(),
-            slot: response.context.slot,
-            baseReserve: baseReserve,
-            quoteReserve: quoteReserve,
-            price: quoteReserve / baseReserve,
-            priceChange: ((quoteReserve / baseReserve) - (this.initialReserveRatio || 1)) * 100,
-            tvl: quoteReserve * 2,
-            marketCap: 0,
-            volumeChange: 0,
-            volume24h: 0,
-            suspicious: false,
-            baseDecimals: baseVaultInfo.value.decimals,
-            quoteDecimals: quoteVaultInfo.value.decimals,
-            buySlippage: 0,
-            sellSlippage: 0,
-            reserveRatio: quoteReserve / baseReserve,
-            initialReserveRatio: this.initialReserveRatio,
-            ratioChange: ((quoteReserve / baseReserve) - (this.initialReserveRatio || 1)) * 100
-          }).value,
-          trade_count: this.tradeCount,
-          reserve_change_percent: 0,
-          time_since_first_trade: 0,
-          has_trade_data: true,
-          timestamp: Date.now()
-        });
-      }
-      
-      // Calculate reserve ratio
-      const reserveRatio = quoteReserve / baseReserve;
+      // Update last reserves for next comparison
+      this.lastBaseReserve = baseReserve;
+      this.lastQuoteReserve = quoteReserve;
       
       // Set initial ratio if not set
       if (this.initialReserveRatio === null) {
-        this.initialReserveRatio = reserveRatio;
+        this.initialReserveRatio = quoteReserve / baseReserve;
       }
-
-      // Calculate ratio change percentage
-      const ratioChange = ((reserveRatio - this.initialReserveRatio) / this.initialReserveRatio) * 100;
 
       // Reset retry count on successful update
       this.retryCount = 0;
 
-      // Calculate price using reserve ratio
-      const price = reserveRatio;
-
-      const snapshot: PoolSnapshot = {
-        poolId: this.poolId.toString(),
-        timestamp: Date.now(),
-        slot: response.context.slot,
-        baseReserve: baseReserve,
-        quoteReserve: quoteReserve,
-        price,
-        priceChange: ratioChange,
-        tvl: quoteReserve * 2,
-        marketCap: 0,
-        volumeChange: 0,
-        volume24h: 0,
-        suspicious: false,
-        baseDecimals: baseVaultInfo.value.decimals,
-        quoteDecimals: quoteVaultInfo.value.decimals,
-        buySlippage: 0,
-        sellSlippage: 0,
-        reserveRatio: reserveRatio,
-        initialReserveRatio: this.initialReserveRatio,
-        ratioChange: ratioChange
-      };
-
-      // Calculate market pressure based on ratio changes
-      const pressure = this.calculateMarketPressure(snapshot);
-
-      // Call update callback with snake_case properties
-      this.onUpdate({
-        pool_id: this.poolId.toString(),
-        base_token: this.tokenA.symbol,
-        quote_token: this.tokenB.symbol,
-        base_reserve: baseReserve,
-        quote_reserve: quoteReserve,
-        price,
-        tvl: quoteReserve * 2,
-        market_pressure: pressure.value,
-        trade_count: this.tradeCount,
-        reserve_change_percent: 0,
-        time_since_first_trade: 0,
-        has_trade_data: false,
-        timestamp: Date.now()
-      });
-
-      // Store in history with required fields
-      await insertPoolHistory({
-        pool_id: this.poolId.toString(),
-        base_symbol: this.tokenA.symbol,
-        quote_symbol: this.tokenB.symbol,
-        timestamp: Date.now(),
-        price,
-        tvl: quoteReserve * 2,
-        base_reserve: baseReserve,
-        quote_reserve: quoteReserve,
-        buy_pressure: pressure.buyPressure,
-        rug_risk: pressure.rugRisk,
-        trend: pressure.trend,
-        volume: 0 // TODO: Calculate 24h volume
-      });
-
-    } catch (error) {
-      this.logger.error('Error processing pool update:', error);
+    } catch (error: any) {
       this.handleError(error);
     }
   }
 
-  private async getVaultBalancesWithRetry(poolState: any): Promise<[any, any] | [null, null]> {
-    const delay = Math.min(this.RETRY_DELAY * Math.pow(2, this.retryCount), this.MAX_RETRY_DELAY);
-    
-    try {
-      const [baseVaultInfo, quoteVaultInfo] = await Promise.all([
-        this.connection.getTokenAccountBalance(poolState.baseVault),
-        this.connection.getTokenAccountBalance(poolState.quoteVault)
-      ]);
-
-      if (!baseVaultInfo.value || !quoteVaultInfo.value) {
-        throw new Error('Invalid token account data');
-      }
-
-      return [baseVaultInfo, quoteVaultInfo];
-    } catch (error: any) {
-      this.retryCount++;
-      
-      if (error.code === -32602 && error.message?.includes('not a Token account')) {
-        // Token accounts not ready yet
-        this.logger.log(`Token accounts not ready for pool ${this.poolId.toString()}, retry ${this.retryCount}/${this.MAX_RETRIES}`);
-        await new Promise(resolve => setTimeout(resolve, delay));
-        return this.getVaultBalancesWithRetry(poolState);
-      }
-      
-      throw error;
+  private detectReserveChange(baseReserve: number, quoteReserve: number): boolean {
+    // If this is the first time we're seeing reserves, it's not a change
+    if (this.lastBaseReserve === null || this.lastQuoteReserve === null) {
+      return false;
     }
+
+    // Calculate percentage changes
+    const baseChange = Math.abs((baseReserve - this.lastBaseReserve) / this.lastBaseReserve);
+    const quoteChange = Math.abs((quoteReserve - this.lastQuoteReserve) / this.lastQuoteReserve);
+    
+    // Consider it a trade if either reserve changed by more than 0.1%
+    const threshold = 0.001; // 0.1%
+    return baseChange > threshold || quoteChange > threshold;
   }
 
   private handleError(error: any) {
-    if (error.code === -32602 && error.message?.includes('not a Token account')) {
-      // Token account error - will be handled by retry logic
+    this.retryCount++;
+    
+    if (error?.response?.status === 429 || (error?.message && error.message.includes('429'))) {
+      this.logger.warn('⚠️  Raydium API rate limited (429). Skipping this update.');
       return;
     }
     
-    // For other errors, log and potentially notify
-    this.logger.error(`Pool ${this.poolId.toString()} error:`, error.message || error);
+    this.logger.error('Error processing pool update:', error?.message || error);
+    
+    if (this.retryCount >= this.MAX_RETRIES) {
+      this.logger.error(`Failed to process pool update after ${this.MAX_RETRIES} retries for pool ${this.poolId.toString()}`);
+    }
   }
 
-  private calculateMarketPressure(snapshot: PoolSnapshot): MarketPressure {
-    const ratioChange = snapshot.ratioChange;
+  private calculateMarketPressure(snapshot: any): MarketPressure {
+    // Calculate market pressure based on reserve ratio changes
+    const ratioChange = snapshot.ratioChange || 0;
     
     // Determine trend direction
     let trend: TrendDirection = TrendDirection.Sideways;
