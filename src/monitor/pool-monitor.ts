@@ -284,11 +284,13 @@ export class PoolMonitor {
       
       if (!Array.isArray(poolInfo) || poolInfo.length === 0 || !poolInfo[0]) {
         // Pool not found or not yet indexed - this is normal for new pools
+        this.logger.debug(`[PoolMonitor] Pool ${this.poolId.toBase58()} not yet indexed by Raydium API`);
         return;
       }
 
       const pool = poolInfo[0];
       if (!pool.mintA || !pool.mintB) {
+        this.logger.debug(`[PoolMonitor] Pool ${this.poolId.toBase58()} missing mint data`);
         return;
       }
 
@@ -297,7 +299,15 @@ export class PoolMonitor {
       
       // Check if we have valid reserves
       if (baseReserve <= 0 || quoteReserve <= 0) {
+        this.logger.debug(`[PoolMonitor] Pool ${this.poolId.toBase58()} has invalid reserves: ${baseReserve} ${this.tokenA.symbol} / ${quoteReserve} ${this.tokenB.symbol}`);
         return;
+      }
+
+      // Log current reserves every 10 seconds for debugging
+      const now = Date.now();
+      if (!this.lastUpdate || (now - this.lastUpdate) > 10000) {
+        this.logger.log(`[PoolMonitor] 📊 ${this.tokenA.symbol}/${this.tokenB.symbol} (${this.poolId.toBase58().substring(0, 8)}...): ${baseReserve.toFixed(2)} ${this.tokenA.symbol} / ${quoteReserve.toFixed(2)} ${this.tokenB.symbol}`);
+        this.lastUpdate = now;
       }
 
       // Detect reserve changes (this is the key insight!)

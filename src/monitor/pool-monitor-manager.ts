@@ -101,6 +101,8 @@ export class PoolMonitorManager implements OnModuleInit, OnModuleDestroy {
         }
       });
 
+      this.logger.log(`[PoolMonitorManager] Created PoolMonitor for ${poolInfo.token_a.symbol}/${poolInfo.token_b.symbol} (${poolInfo.pool_id.substring(0, 8)}...)`);
+
       // Store pool info
       this.pools.set(poolInfo.pool_id, {
         pool_id: poolInfo.pool_id,
@@ -111,7 +113,9 @@ export class PoolMonitorManager implements OnModuleInit, OnModuleDestroy {
 
       // Start monitoring
       try {
+        this.logger.log(`[PoolMonitorManager] Starting monitoring for ${poolInfo.token_a.symbol}/${poolInfo.token_b.symbol} (${poolInfo.pool_id.substring(0, 8)}...)`);
         await monitor.start();
+        this.logger.log(`[PoolMonitorManager] ✅ Successfully started monitoring for ${poolInfo.token_a.symbol}/${poolInfo.token_b.symbol} (${poolInfo.pool_id.substring(0, 8)}...)`);
       } catch (error) {
         this.logger.error(`Failed to start monitor for pool ${poolInfo.pool_id}: ${error instanceof Error ? error.message : 'Unknown error'}`);
         this.pools.delete(poolInfo.pool_id);
@@ -168,6 +172,30 @@ export class PoolMonitorManager implements OnModuleInit, OnModuleDestroy {
       throw new Error('PoolMonitorManager not initialized');
     }
     return Array.from(this.pools.values());
+  }
+
+  getActiveMonitorCount(): number {
+    if (!this.isInitialized) {
+      return 0;
+    }
+    return this.pools.size;
+  }
+
+  logMonitorStatus(): void {
+    if (!this.isInitialized) {
+      this.logger.log('[PoolMonitorManager] Not initialized');
+      return;
+    }
+
+    const poolCount = this.pools.size;
+    this.logger.log(`[PoolMonitorManager] Status: ${poolCount} active monitors`);
+    
+    if (poolCount > 0) {
+      this.logger.log('[PoolMonitorManager] Active pools:');
+      for (const [poolId, pool] of this.pools.entries()) {
+        this.logger.log(`  • ${pool.token_a.symbol}/${pool.token_b.symbol} (${poolId.substring(0, 8)}...) - Monitor: ${pool.monitor ? '✅ Active' : '❌ Inactive'}`);
+      }
+    }
   }
 
   private onUpdate(update: PoolUpdate) {

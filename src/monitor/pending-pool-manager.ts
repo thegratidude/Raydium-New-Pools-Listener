@@ -262,6 +262,12 @@ export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
     // Build status message
     let statusMessage = `Status: ${pendingCount} pending, ${indexedCount} indexed pools`;
     
+    // Add monitor status if available
+    if (this.poolMonitorManager) {
+      const activeMonitors = this.poolMonitorManager.getActiveMonitorCount();
+      statusMessage += ` | ${activeMonitors} active monitors`;
+    }
+    
     // Add individual pool details if there are any pools
     if (pendingCount > 0 || indexedCount > 0) {
       const pendingPools = Array.from(this.pendingPools.values())
@@ -271,41 +277,38 @@ export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
         statusMessage += '\n  Pools:';
         pendingPools.forEach(pool => {
           const waitTime = Math.floor((now - pool.last_update_time) / 1000);
-          const poolIdShort = pool.pool_id.slice(0, 6);
+          const poolIdShort = pool.pool_id.substring(0, 6);
           
-          // Determine detailed status based on pool state and conditions
-          let detailedStatus = '';
-          let tradeInfo = '';
-          
+          let status = '';
           if (pool.state === 'pending') {
-            if (waitTime < 10) {
-              detailedStatus = '⏳ Awaiting indexing (10s delay)';
-            } else {
-              detailedStatus = '🔄 Moving to indexed state...';
-            }
+            status = `⏳ Awaiting indexing (${waitTime}s)`;
           } else if (pool.state === 'indexed') {
             if (pool.trade_count === 0) {
-              detailedStatus = '🎧 Awaiting first swaps';
+              status = `🎧 Awaiting first swaps (${waitTime}s)`;
             } else if (pool.trade_count === 1) {
-              detailedStatus = '🔥 First trade detected, waiting for more';
-            } else if (pool.trade_count >= 2) {
-              detailedStatus = '📊 Multiple trades detected';
-              tradeInfo = ` (${pool.trade_count} trades, ${pool.reserve_changes.toFixed(2)}% reserve change)`;
-            }
-            
-            // Check if we're approaching timeout
-            const timeUntilTimeout = this.MAX_WAIT_TIME - (waitTime * 1000);
-            if (timeUntilTimeout < 60000 && timeUntilTimeout > 0) { // Less than 1 minute left
-              detailedStatus += ` ⚠️ Timeout in ${Math.ceil(timeUntilTimeout / 1000)}s`;
+              status = `🔥 First trade detected, waiting for more (${waitTime}s)`;
+            } else {
+              status = `📊 Multiple trades detected (${pool.trade_count} trades, ${pool.reserve_changes.toFixed(2)}% reserve change) (${waitTime}s)`;
             }
           }
           
-          statusMessage += `\n    • ${poolIdShort}...: ${detailedStatus}${tradeInfo} (${waitTime}s)`;
+          // Add timeout warning
+          if (waitTime > 240) { // 4 minutes
+            status += ` ⚠️ Timeout in ${300 - waitTime}s`;
+          }
+          
+          statusMessage += `\n    • ${poolIdShort}...: ${status}`;
         });
       }
     }
     
-    this.logger.log(statusMessage);
+    this.logger.log(`[PendingPoolManager] ${statusMessage}`);
+    this.lastStatusLogTime = now;
+    
+    // Log monitor status every 30 seconds
+    if (this.poolMonitorManager && (now - this.lastStatusLogTime) > 30000) {
+      this.poolMonitorManager.logMonitorStatus();
+    }
   }
 
   private shouldLogStatus(): boolean {
