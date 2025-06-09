@@ -35,6 +35,16 @@ export const WSS_URL = process.env.WSS_URL;
 
 export const RAYDIUM = new PublicKey(RAYDIUM_PUBLIC_KEY);
 
+export const INSTRUCTION_NAMES = [
+  'initialize2',           // Original instruction
+  'initialize',            // Alternative initialization
+  'createPool',           // Pool creation instruction
+  'createAmm',            // AMM creation
+  'initializeAmm',        // AMM initialization
+  'createPoolV4',         // V4 pool creation
+  'initializePoolV4'      // V4 pool initialization
+];
+
 export const INSTRUCTION_NAME = 'initialize2';
 
 export const rpcConnection = new Connection(HTTP_URL, {
@@ -79,7 +89,7 @@ async function bootstrap() {
   fileLogger.log('NestJS application started with file logging enabled', 'Bootstrap');
 
   // Start the pool listener with the app instance
-  await startListener(app, rpcConnection, RAYDIUM, INSTRUCTION_NAME);
+  await startListener(app, rpcConnection, RAYDIUM, INSTRUCTION_NAMES);
 
   // Handle graceful shutdown
   process.on('SIGINT', async () => {

@@ -220,30 +220,30 @@ function decodePoolState(data: Buffer) {
 
 export class PoolMonitor {
   private connection: Connection;
-  private poolId: PublicKey;
-  private tokenA: TokenInfo;
-  private tokenB: TokenInfo;
+  protected poolId: PublicKey;
+  protected tokenA: TokenInfo;
+  protected tokenB: TokenInfo;
   private onUpdate: (update: PoolUpdate) => void;
   private isSimulation: boolean;
   private lastUpdate: number = 0;
-  private updateInterval: number = 1000; // Reduced to 1 second for faster detection
+  protected updateInterval: number = 1000; // Reduced to 1 second for faster detection
   private initialReserveRatio: number | null = null;
   private retryCount: number = 0;
   private readonly MAX_RETRIES = 5;
   private readonly RETRY_DELAY = 2000;
   private readonly MAX_RETRY_DELAY = 32000;
   private hasSeenTrade: boolean = false;
-  private intervalId: NodeJS.Timeout | null = null;
+  protected intervalId: NodeJS.Timeout | null = null;
   private readonly logger = new Logger(PoolMonitor.name);
   
   // Reserve tracking for change detection
-  private lastBaseReserve: number | null = null;
-  private lastQuoteReserve: number | null = null;
+  protected lastBaseReserve: number | null = null;
+  protected lastQuoteReserve: number | null = null;
   private firstTradeTime: number | null = null;
   private tradeCount: number = 0;
   private readonly TRADE_THRESHOLD = 1; // Ready after first reserve change
   private readonly TRADE_WINDOW = 30000; // 30 seconds window
-  private readonly RESERVE_CHANGE_THRESHOLD = 0.0005; // 0.05% - ultra sensitive for early detection
+  protected readonly RESERVE_CHANGE_THRESHOLD = 0.0005; // 0.05% - ultra sensitive for early detection
   
   // Polling tracking
   private pollCount: number = 0;
@@ -254,8 +254,8 @@ export class PoolMonitor {
   private unindexedRetryCount: number = 0;
   
   // Add silent monitoring mode
-  private isSilentMode: boolean = false;
-  private hasDetectedActivity: boolean = false;
+  protected isSilentMode: boolean = false;
+  protected hasDetectedActivity: boolean = false;
 
   // Add initial price tracking for position monitoring
   private initialPrice: number | null = null;
@@ -337,7 +337,7 @@ export class PoolMonitor {
     this.logger.log(`[PoolMonitor] 🛑 Stopped monitoring for pool: ${this.poolId.toBase58()}`);
   }
 
-  private async processPoolUpdate() {
+  protected async processPoolUpdate() {
     try {
       // Track polling frequency
       this.pollCount++;
@@ -548,7 +548,7 @@ export class PoolMonitor {
     }
   }
 
-  private detectReserveChange(baseReserve: number, quoteReserve: number): boolean {
+  protected detectReserveChange(baseReserve: number, quoteReserve: number): boolean {
     // If this is the first time we're seeing reserves, it's not a change
     if (this.lastBaseReserve === null || this.lastQuoteReserve === null) {
       return false;
