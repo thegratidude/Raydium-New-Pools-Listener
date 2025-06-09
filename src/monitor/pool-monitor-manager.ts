@@ -1,7 +1,7 @@
 import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { Connection, PublicKey } from '@solana/web3.js';
 import { TokenInfo } from '../types/token';
-import { PoolMonitor } from './pool-monitor';
+import { PoolMonitor } from '../scripts/pool-monitor/monitor';
 import { SocketService } from '../gateway/socket.service';
 import { PendingPoolManager } from './pending-pool-manager';
 import { PoolUpdate, PoolBroadcastMessage, createMarketPressure } from '../types/market';
@@ -22,6 +22,8 @@ export class PoolMonitorManager implements OnModuleInit, OnModuleDestroy {
   private readonly httpEndpoint: string;
   private readonly wssEndpoint: string;
   private isInitialized = false;
+  private statusInterval: NodeJS.Timeout | null = null;
+  private lastStatusTime = 0;
 
   constructor(
     private readonly connection: Connection,
@@ -45,6 +47,9 @@ export class PoolMonitorManager implements OnModuleInit, OnModuleDestroy {
     try {
       this.logger.log('[PoolMonitorManager] Initializing...');
       this.isInitialized = true;
+      
+      // Start periodic status reporting
+      this.startStatusReporting();
     } catch (error) {
       this.logger.error('[PoolMonitorManager] Failed to initialize:', error instanceof Error ? error.message : 'Unknown error');
       throw error;
@@ -54,6 +59,9 @@ export class PoolMonitorManager implements OnModuleInit, OnModuleDestroy {
   async onModuleDestroy() {
     this.logger.log('[PoolMonitorManager] Shutting down...');
     try {
+      // Stop status reporting
+      this.stopStatusReporting();
+      
       // Stop all monitors
       for (const pool of this.pools.values()) {
         if (pool.monitor) {
@@ -70,6 +78,102 @@ export class PoolMonitorManager implements OnModuleInit, OnModuleDestroy {
       this.logger.error('[PoolMonitorManager] Error during shutdown:', error instanceof Error ? error.message : 'Unknown error');
       throw error;
     }
+  }
+
+  private startStatusReporting() {
+    if (this.statusInterval) {
+      clearInterval(this.statusInterval);
+    }
+    
+    // Report status every 60 seconds (1 minute)
+    this.statusInterval = setInterval(() => {
+      this.reportStatus();
+    }, 60000);
+    
+    this.logger.log('[PoolMonitorManager] Started periodic status reporting (every 60 seconds)');
+  }
+
+  private stopStatusReporting() {
+    if (this.statusInterval) {
+      clearInterval(this.statusInterval);
+      this.statusInterval = null;
+      this.logger.log('[PoolMonitorManager] Stopped periodic status reporting');
+    }
+  }
+
+  private reportStatus() {
+    if (!this.isInitialized) {
+      return;
+    }
+
+    const now = Date.now();
+    const totalPools = this.pools.size;
+    
+    if (totalPools === 0) {
+      this.logger.log('📊 MONITOR STATUS: No pools currently being monitored');
+      return;
+    }
+
+    // Separate pools by monitoring state
+    const activePools: ManagedPool[] = [];
+    const silentPools: ManagedPool[] = [];
+
+    for (const pool of this.pools.values()) {
+      if (pool.monitor) {
+        // Check if monitor is in silent mode or has detected activity
+        if (pool.monitor.isInSilentMode() && !pool.monitor.getHasDetectedActivity()) {
+          silentPools.push(pool);
+        } else {
+          activePools.push(pool);
+        }
+      } else {
+        silentPools.push(pool);
+      }
+    }
+
+    // Build status message
+    let statusMessage = `📊 MONITOR STATUS (${new Date().toLocaleTimeString()})`;
+    statusMessage += `\n${'='.repeat(60)}`;
+    statusMessage += `\nTotal Pools: ${totalPools}`;
+    statusMessage += `\nActive Monitors: ${activePools.length}`;
+    statusMessage += `\nSilent Monitors: ${silentPools.length}`;
+    
+    if (activePools.length > 0) {
+      statusMessage += `\n\n🟢 ACTIVE POOLS:`;
+      activePools.forEach((pool, index) => {
+        const poolIdShort = pool.pool_id.substring(0, 8);
+        statusMessage += `\n  ${index + 1}. ${pool.token_a.symbol}/${pool.token_b.symbol} (${poolIdShort}...)`;
+      });
+    }
+    
+    if (silentPools.length > 0) {
+      statusMessage += `\n\n🔇 SILENT POOLS:`;
+      silentPools.forEach((pool, index) => {
+        const poolIdShort = pool.pool_id.substring(0, 8);
+        statusMessage += `\n  ${index + 1}. ${pool.token_a.symbol}/${pool.token_b.symbol} (${poolIdShort}...)`;
+      });
+    }
+
+    // Add pending pools info if available
+    if (this.pendingPoolManager) {
+      const pendingPools = this.pendingPoolManager.getAllPools();
+      if (pendingPools.length > 0) {
+        statusMessage += `\n\n⏳ PENDING POOLS: ${pendingPools.length}`;
+        pendingPools.slice(0, 3).forEach((pool, index) => {
+          const poolIdShort = pool.pool_id.substring(0, 8);
+          const waitTime = Math.floor((now - pool.last_update_time) / 1000);
+          statusMessage += `\n  ${index + 1}. ${pool.token_a.symbol}/${pool.token_b.symbol} (${poolIdShort}...) - ${pool.state} (${waitTime}s)`;
+        });
+        if (pendingPools.length > 3) {
+          statusMessage += `\n  ... and ${pendingPools.length - 3} more`;
+        }
+      }
+    }
+
+    statusMessage += `\n${'='.repeat(60)}`;
+    
+    this.logger.log(statusMessage);
+    this.lastStatusTime = now;
   }
 
   async addPool(poolInfo: { pool_id: string; token_a: TokenInfo; token_b: TokenInfo }) {

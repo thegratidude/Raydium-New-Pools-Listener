@@ -291,6 +291,16 @@ export class PoolMonitor {
     }
   }
 
+  // Public method to check if monitor is in silent mode
+  public isInSilentMode(): boolean {
+    return this.isSilentMode;
+  }
+
+  // Public method to check if monitor has detected activity
+  public getHasDetectedActivity(): boolean {
+    return this.hasDetectedActivity;
+  }
+
   async start() {
     this.logger.log(`[PoolMonitor] 🚀 STARTING monitor for pool: ${this.tokenA.symbol}/${this.tokenB.symbol} (${this.poolId.toBase58()})`);
 
@@ -353,7 +363,7 @@ export class PoolMonitor {
         if (this.isSilentMode) {
           // Silent mode - just return without logging
           return;
-        } else {
+      } else {
           this.logger.log(`[PoolMonitor] ❌ Pool ${this.poolId.toBase58().substring(0, 8)}... not yet indexed by Raydium API`);
         }
         return;
