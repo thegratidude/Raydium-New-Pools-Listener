@@ -44,13 +44,12 @@ export class HealthMonitorService implements OnModuleInit, OnModuleDestroy {
     const minutes = Math.floor((uptime % 3600) / 60);
     const seconds = uptime % 60;
 
-    this.logger.log('\n🏥 HEALTH STATUS UPDATE');
-    this.logger.log('════════════════════════════════════════════════════════════════════════════════');
+    this.logger.log('═══════════════════════════════════════════════════════════════════════════════════');
     this.logger.log(`⏰ Uptime: ${hours}h ${minutes}m ${seconds}s`);
     this.logger.log(`📨 Raydium messages in last ${Math.round(timeSinceLastCheck/1000)}s: ${this.raydiumMessageCount}`);
     this.logger.log(`📊 Messages per minute: ${Math.round(messagesPerMinute)}`);
     this.logger.log(`🔗 Socket service ready: ${this.socketService.isReady()}`);
-    this.logger.log('════════════════════════════════════════════════════════════════════════════════\n');
+    this.logger.log('═══════════════════════════════════════════════════════════════════════════════════\n');
 
     // Reset counter for next check
     this.lastHealthCheck = now;

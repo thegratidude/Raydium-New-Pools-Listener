@@ -7,10 +7,11 @@ import { insertPoolHistory } from './pool-history-db';
 import { struct, nu64, blob, Layout } from '@solana/buffer-layout';
 import { getRaydiumRoundTripQuote } from '../raydium/quoteRaydium';
 import { TokenInfo } from '../types/token';
-import { LIQUIDITY_STATE_LAYOUT_V4 } from './raydium-layout';
+import { LIQUIDITY_STATE_LAYOUT_V4, decodePoolStateFlexible } from './raydium-layout';
 import { AccountInfo as TokenAccountInfo } from '@solana/web3.js';
 import { PoolUpdate } from '../types/market';
 import { createMarketPressure } from '../types/market';
+import { Logger } from '@nestjs/common';
 
 interface PoolMonitorOptions {
   poolId: string;
@@ -201,7 +202,10 @@ const WSOL_MINTS = [
 // Helper function to decode pool state
 function decodePoolState(data: Buffer) {
   try {
-    const decoded = LIQUIDITY_STATE_LAYOUT_V4.decode(data);
+    // Use the flexible decoder that can handle different account types
+    const decoded = decodePoolStateFlexible(data);
+    if (!decoded) return null;
+    
     return {
       baseMint: new PublicKey(decoded.baseMint),
       quoteMint: new PublicKey(decoded.quoteMint),
@@ -237,6 +241,7 @@ export class PoolMonitor {
   private firstTradeTime: number | null = null;
   private initialBaseReserve: number | null = null;
   private initialQuoteReserve: number | null = null;
+  private readonly logger = new Logger(PoolMonitor.name);
 
   constructor(options: {
     poolId: PublicKey;
@@ -259,7 +264,7 @@ export class PoolMonitor {
   }
 
   async start() {
-    console.log(`[PoolMonitor] STARTED monitoring for pool: ${this.tokenA.symbol}/${this.tokenB.symbol} (${this.poolId.toBase58()})`);
+    this.logger.log(`Started monitoring for pool: ${this.tokenA.symbol}/${this.tokenB.symbol} (${this.poolId.toBase58()})`);
     
     // Subscribe to program account changes for swap events
     this.subscriptionId = this.connection.onProgramAccountChange(
@@ -290,8 +295,8 @@ export class PoolMonitor {
                   this.firstTradeTime = Date.now();
                   this.initialBaseReserve = baseReserve;
                   this.initialQuoteReserve = quoteReserve;
-                  console.log(`[PoolMonitor] 🔥 First trade detected for pool ${this.poolId.toBase58()}`);
-                  console.log(`  Initial reserves: ${baseReserve} ${this.tokenA.symbol} / ${quoteReserve} ${this.tokenB.symbol}`);
+                  this.logger.log(`🔥 First trade detected for pool ${this.poolId.toBase58()}`);
+                  this.logger.log(`  Initial reserves: ${baseReserve} ${this.tokenA.symbol} / ${quoteReserve} ${this.tokenB.symbol}`);
                 } else {
                   const timeSinceFirstTrade = Date.now() - this.firstTradeTime;
                   
@@ -300,12 +305,12 @@ export class PoolMonitor {
                   const quoteReserveChange = Math.abs(((quoteReserve - (this.initialQuoteReserve || 0)) / (this.initialQuoteReserve || 1)) * 100);
                   const maxReserveChange = Math.max(baseReserveChange, quoteReserveChange);
                   
-                  console.log(`[PoolMonitor] Trade #${this.tradeCount} detected (${timeSinceFirstTrade/1000}s since first trade)`);
-                  console.log(`  Reserve changes: ${baseReserveChange.toFixed(2)}% ${this.tokenA.symbol} / ${quoteReserveChange.toFixed(2)}% ${this.tokenB.symbol}`);
+                  this.logger.log(`Trade #${this.tradeCount} detected (${timeSinceFirstTrade/1000}s since first trade)`);
+                  this.logger.log(`  Reserve changes: ${baseReserveChange.toFixed(2)}% ${this.tokenA.symbol} / ${quoteReserveChange.toFixed(2)}% ${this.tokenB.symbol}`);
                   
                   // If we've seen enough trades within our window, notify
                   if (this.tradeCount >= this.TRADE_THRESHOLD && timeSinceFirstTrade <= this.TRADE_WINDOW) {
-                    console.log(`[PoolMonitor] 🎯 Pool ${this.poolId.toBase58()} is ready! Seen ${this.tradeCount} trades in ${(timeSinceFirstTrade/1000).toFixed(1)}s with ${maxReserveChange.toFixed(2)}% max reserve change`);
+                    this.logger.log(`🎯 Pool ${this.poolId.toBase58()} is ready! Seen ${this.tradeCount} trades in ${(timeSinceFirstTrade/1000).toFixed(1)}s with ${maxReserveChange.toFixed(2)}% max reserve change`);
                     
                     this.onUpdate({
                       pool_id: this.poolId.toString(),
@@ -348,7 +353,7 @@ export class PoolMonitor {
             }
           }
         } catch (error) {
-          console.error('Error processing program account change:', error);
+          this.logger.error('Error processing program account change:', error);
         }
       },
       'confirmed'
@@ -368,14 +373,14 @@ export class PoolMonitor {
       this.connection.removeProgramAccountChangeListener(this.subscriptionId);
       this.subscriptionId = null;
     }
-    console.log(`[PoolMonitor] STOPPED monitoring for pool: ${this.poolId.toBase58()}`);
+    this.logger.log(`Stopped monitoring for pool: ${this.poolId.toBase58()}`);
   }
 
   private async processPoolUpdate() {
     try {
       const response = await this.connection.getAccountInfoAndContext(this.poolId);
       if (!response.value) {
-        console.error(`Pool ${this.poolId.toString()} not found`);
+        this.logger.error(`Pool ${this.poolId.toString()} not found`);
         return;
       }
 
@@ -387,7 +392,7 @@ export class PoolMonitor {
       if (!baseVaultInfo || !quoteVaultInfo) {
         // If we've exceeded retries, notify the pending pool manager
         if (this.retryCount >= this.MAX_RETRIES) {
-          console.error(`Failed to get vault balances after ${this.MAX_RETRIES} retries for pool ${this.poolId.toString()}`);
+          this.logger.error(`Failed to get vault balances after ${this.MAX_RETRIES} retries for pool ${this.poolId.toString()}`);
           return;
         }
         return;
@@ -513,7 +518,7 @@ export class PoolMonitor {
       });
 
     } catch (error) {
-      console.error('Error processing pool update:', error);
+      this.logger.error('Error processing pool update:', error);
       this.handleError(error);
     }
   }
@@ -537,7 +542,7 @@ export class PoolMonitor {
       
       if (error.code === -32602 && error.message?.includes('not a Token account')) {
         // Token accounts not ready yet
-        console.log(`Token accounts not ready for pool ${this.poolId.toString()}, retry ${this.retryCount}/${this.MAX_RETRIES}`);
+        this.logger.log(`Token accounts not ready for pool ${this.poolId.toString()}, retry ${this.retryCount}/${this.MAX_RETRIES}`);
         await new Promise(resolve => setTimeout(resolve, delay));
         return this.getVaultBalancesWithRetry(poolState);
       }
@@ -553,7 +558,7 @@ export class PoolMonitor {
     }
     
     // For other errors, log and potentially notify
-    console.error(`Pool ${this.poolId.toString()} error:`, error.message || error);
+    this.logger.error(`Pool ${this.poolId.toString()} error:`, error.message || error);
   }
 
   private calculateMarketPressure(snapshot: PoolSnapshot): MarketPressure {

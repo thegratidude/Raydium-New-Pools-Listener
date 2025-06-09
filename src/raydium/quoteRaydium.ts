@@ -1,6 +1,7 @@
 import { PublicKey, Connection } from '@solana/web3.js';
 import * as BufferLayout from '@solana/buffer-layout';
 import * as dotenv from 'dotenv';
+import { decodePoolStateFlexible } from '../monitor/raydium-layout';
 dotenv.config();
 
 const HELIUS_RPC_URL = process.env.HELIUS_RPC_URL!;
@@ -83,18 +84,26 @@ function decodePubkey(buf: Buffer | Uint8Array) {
 }
 
 function decodePoolState(data: Buffer) {
-  const d = LIQUIDITY_STATE_LAYOUT_V4.decode(data) as any;
-  return {
-    baseMint: decodePubkey(d.baseMint),
-    quoteMint: decodePubkey(d.quoteMint),
-    baseDecimal: Number(d.baseDecimal),
-    quoteDecimal: Number(d.quoteDecimal),
-    swapFeeNumerator: Number(d.swapFeeNumerator),
-    swapFeeDenominator: Number(d.swapFeeDenominator),
-    // For reserves, fetch from vaults or use external method; here we keep as before for compatibility
-    // baseReserve: ...
-    // quoteReserve: ...
-  };
+  try {
+    // Use the flexible decoder that can handle different account types
+    const decoded = decodePoolStateFlexible(data);
+    if (!decoded) return null;
+    
+    return {
+      baseMint: decoded.baseMint, // Already a string from the flexible decoder
+      quoteMint: decoded.quoteMint, // Already a string from the flexible decoder
+      baseDecimal: decoded.baseDecimal,
+      quoteDecimal: decoded.quoteDecimal,
+      swapFeeNumerator: 0, // Default value
+      swapFeeDenominator: 10000, // Default value
+      // For reserves, fetch from vaults or use external method; here we keep as before for compatibility
+      // baseReserve: ...
+      // quoteReserve: ...
+    };
+  } catch (error) {
+    console.error('Failed to decode pool state:', error);
+    return null;
+  }
 }
 
 function applyDecimals(amount: number, decimals: number) {

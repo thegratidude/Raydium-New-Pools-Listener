@@ -83,11 +83,11 @@ export class PoolMonitorManager implements OnModuleInit, OnModuleDestroy {
       }
 
       if (this.pools.has(poolInfo.pool_id)) {
-        this.logger.log(`[PoolMonitorManager] Pool ${poolInfo.pool_id} already exists`);
+        this.logger.debug(`Pool ${poolInfo.pool_id} already exists`);
         return;
       }
 
-      this.logger.log(`[PoolMonitorManager] Adding pool: ${poolInfo.token_a.symbol}/${poolInfo.token_b.symbol} (${poolInfo.pool_id})`);
+      this.logger.log(`Adding pool: ${poolInfo.token_a.symbol}/${poolInfo.token_b.symbol} (${poolInfo.pool_id})`);
 
       // Create monitor
       const monitor = new PoolMonitor({
@@ -113,12 +113,12 @@ export class PoolMonitorManager implements OnModuleInit, OnModuleDestroy {
       try {
         await monitor.start();
       } catch (error) {
-        this.logger.error(`Failed to start monitor for pool ${poolInfo.pool_id}:`, error instanceof Error ? error.message : 'Unknown error');
+        this.logger.error(`Failed to start monitor for pool ${poolInfo.pool_id}: ${error instanceof Error ? error.message : 'Unknown error'}`);
         this.pools.delete(poolInfo.pool_id);
         throw error;
       }
     } catch (error) {
-      this.logger.error(`Failed to add pool ${poolInfo.pool_id}:`, error instanceof Error ? error.message : 'Unknown error');
+      this.logger.error(`Failed to add pool ${poolInfo.pool_id}: ${error instanceof Error ? error.message : 'Unknown error'}`);
       throw error;
     }
   }

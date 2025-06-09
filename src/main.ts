@@ -7,6 +7,7 @@ import { execSync } from 'child_process';
 import { Logger } from '@nestjs/common';
 import * as express from 'express';
 import { SocketService } from './gateway/socket.service';
+import { FileLoggerService } from './utils/file-logger.service';
 
 // Kill any process using port 5001 (macOS/Linux only)
 try {
@@ -41,6 +42,9 @@ export const rpcConnection = new Connection(HTTP_URL, {
 });
 
 async function bootstrap() {
+  // Initialize file logger
+  const fileLogger = new FileLoggerService();
+  
   const logger = new Logger('Bootstrap');
   const expressApp = express();
   
@@ -48,15 +52,15 @@ async function bootstrap() {
     // Disable the built-in HTTP server since we're using our own
     bodyParser: true,
     cors: true,
-    logger: ['error', 'warn', 'log'], // Only show error, warn, and log levels
+    logger: fileLogger, // Use our custom file logger
   });
 
   // Get the SocketService and set the Express app before app.init()
   const socketService = app.get(SocketService);
   socketService.setExpressApp(expressApp);
 
-  // Configure minimal logging
-  app.useLogger(new Logger('App'));
+  // Configure logging with our file logger
+  app.useLogger(fileLogger);
 
   const corsOptions = {
     origin: '*',
@@ -72,9 +76,25 @@ async function bootstrap() {
   await app.init();
   
   logger.log('Application ready');
+  fileLogger.log('NestJS application started with file logging enabled', 'Bootstrap');
 
   // Start the pool listener with the app instance
   await startListener(app, rpcConnection, RAYDIUM, INSTRUCTION_NAME);
+
+  // Handle graceful shutdown
+  process.on('SIGINT', async () => {
+    fileLogger.log('Received SIGINT, shutting down gracefully...', 'Bootstrap');
+    fileLogger.close();
+    await app.close();
+    process.exit(0);
+  });
+
+  process.on('SIGTERM', async () => {
+    fileLogger.log('Received SIGTERM, shutting down gracefully...', 'Bootstrap');
+    fileLogger.close();
+    await app.close();
+    process.exit(0);
+  });
 
   // Keep the application running
   await app.listen(0); // Listen on a random port since we're using our own HTTP server

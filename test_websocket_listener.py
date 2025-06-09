@@ -10,7 +10,7 @@ from colorama import init, Fore, Style
 SERVER_URL = 'http://localhost:5001'
 RECONNECT_DELAY = 5  # seconds
 NEW_POOL_COUNT = 0
-MESSAGE_LOG_FILE = 'websocket_messages.log'
+MESSAGE_LOG_FILE = 'logs/websocket_messages.log'
 
 # Initialize colorama for cross-platform colored terminal output
 init()

@@ -4,10 +4,12 @@ import { createServer } from 'http';
 import { Express } from 'express';
 import { execSync } from 'child_process';
 import { MarketPressure, PoolBroadcastMessage, PoolReadyMessage, isMarketPressure } from '../types/market';
+import { FileLoggerService } from '../utils/file-logger.service';
 
 @Injectable()
 export class SocketService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(SocketService.name);
+  private readonly fileLogger = new FileLoggerService();
   private healthCheckInterval: NodeJS.Timeout | null = null;
   private readonly PORT = 5001;
   private isInitialized = false;
@@ -78,12 +80,34 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
         this.logger.log(`Client transport: ${socket.conn.transport.name}`);
         this.logger.log(`Client remote address: ${socket.conn.remoteAddress}`);
         
+        // Log WebSocket connection event
+        this.fileLogger.logWebSocketEvent('client_connected', {
+          client_id: socket.id,
+          transport: socket.conn.transport.name,
+          remote_address: socket.conn.remoteAddress,
+          timestamp: new Date().toISOString()
+        });
+        
         socket.on('disconnect', (reason) => {
           this.logger.log(`❌ Client disconnected - ID: ${socket.id}, reason: ${reason}`);
+          
+          // Log WebSocket disconnection event
+          this.fileLogger.logWebSocketEvent('client_disconnected', {
+            client_id: socket.id,
+            reason: reason,
+            timestamp: new Date().toISOString()
+          });
         });
 
         socket.on('error', (error) => {
           this.logger.error(`Socket error for client ${socket.id}: ${error.message}`);
+          
+          // Log WebSocket error event
+          this.fileLogger.logWebSocketEvent('client_error', {
+            client_id: socket.id,
+            error: error.message,
+            timestamp: new Date().toISOString()
+          });
         });
       });
 
@@ -139,6 +163,15 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
 
     this.logger.log(`📢 Broadcasting new pool: ${message.pool_id}`);
     this.trackMessage('new_pool');
+    
+    // Log WebSocket new pool event
+    this.fileLogger.logWebSocketEvent('new_pool_broadcast', {
+      pool_id: message.pool_id,
+      base_token: message.data.base_token,
+      quote_token: message.data.quote_token,
+      timestamp: new Date().toISOString()
+    });
+    
     this.server.emit('new_pool', message);
   }
 
@@ -159,6 +192,17 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
       time_since_last_check_ms: timeSinceLastCheck,
       active_clients: this.clients.size
     };
+    
+    // Log WebSocket health event (but only occasionally to avoid spam)
+    if (this.totalMessagesSinceLastCheck > 0) {
+      this.fileLogger.logWebSocketEvent('health_broadcast', {
+        uptime: uptime,
+        messages_since_last_check: this.totalMessagesSinceLastCheck,
+        messages_per_minute: Math.round(messagesPerMinute),
+        active_clients: this.clients.size,
+        timestamp: new Date().toISOString()
+      });
+    }
     
     // Emit to the pools namespace (for existing clients)
     this.server.emit('health', message);
@@ -201,6 +245,9 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
     if (this.server) {
       this.server.close();
     }
+    
+    // Close file logger
+    this.fileLogger.close();
   }
 
   isReady(): boolean {
@@ -214,12 +261,16 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
     }
 
     try {
-      // Validate market pressure data
-      if (message.data.market_pressure && !isMarketPressure(message.data.market_pressure)) {
-        throw new Error('Invalid market pressure data');
-      }
-
       this.trackMessage('pool_update');
+      
+      // Log WebSocket pool update event
+      this.fileLogger.logWebSocketEvent('pool_update_broadcast', {
+        pool_id: message.pool_id,
+        base_token: message.data.base_token,
+        quote_token: message.data.quote_token,
+        timestamp: new Date().toISOString()
+      });
+      
       this.server.emit('pool_update', message);
     } catch (error) {
       this.logger.error('Error broadcasting pool update:', error instanceof Error ? error.message : 'Unknown error');
@@ -234,6 +285,15 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
 
     try {
       this.trackMessage('pool_ready');
+      
+      // Log WebSocket pool ready event
+      this.fileLogger.logWebSocketEvent('pool_ready_broadcast', {
+        pool_id: message.pool_id,
+        base_token: message.data.base_token,
+        quote_token: message.data.quote_token,
+        timestamp: new Date().toISOString()
+      });
+      
       this.server.emit('pool_ready', message);
     } catch (error) {
       this.logger.error('Error broadcasting pool ready:', error instanceof Error ? error.message : 'Unknown error');
@@ -245,6 +305,14 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn('Socket service not ready, cannot broadcast');
       return;
     }
+    
+    // Log generic WebSocket broadcast event
+    this.fileLogger.logWebSocketEvent(`${event}_broadcast`, {
+      event: event,
+      data: data,
+      timestamp: new Date().toISOString()
+    });
+    
     this.server.emit(event, data);
   }
 
