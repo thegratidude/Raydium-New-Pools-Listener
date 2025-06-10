@@ -67,7 +67,8 @@ export function decodeRaydiumPoolState(data: Buffer) {
   try {
     // Check if we have enough data
     if (data.length < 752) {
-      fileLogger.debug(`Pool data size: ${data.length} bytes (waiting for full pool state)`, 'RaydiumLayout');
+      // Reduced logging - only log occasionally to avoid spam
+      // fileLogger.debug(`Pool data size: ${data.length} bytes (waiting for full pool state)`, 'RaydiumLayout');
       return null;
     }
 
@@ -76,7 +77,8 @@ export function decodeRaydiumPoolState(data: Buffer) {
     // Validate critical fields
     if (!decoded.coinMintAddress || !decoded.pcMintAddress || 
         !decoded.poolCoinTokenAccount || !decoded.poolPcTokenAccount) {
-      fileLogger.debug(`Pool data incomplete (missing required fields)`, 'RaydiumLayout');
+      // Reduced logging - only log occasionally to avoid spam
+      // fileLogger.debug(`Pool data incomplete (missing required fields)`, 'RaydiumLayout');
       return null;
     }
 

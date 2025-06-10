@@ -1,9 +1,14 @@
 import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
-import { Connection } from '@solana/web3.js';
+import { Connection, PublicKey } from '@solana/web3.js';
 import { PoolMonitorManager } from './pool-monitor-manager';
+import { SocketService } from '../gateway/socket.service';
 import { TokenInfo } from '../types/token';
+import { LIQUIDITY_STATE_LAYOUT_V4, decodeRaydiumPoolState } from './raydium-layout';
+import bs58 from 'bs58';
 import * as fs from 'fs';
 import * as path from 'path';
+
+const RAYDIUM_PROGRAM_ID = new PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8');
 
 export interface PendingPool {
   pool_id: string;
@@ -14,6 +19,8 @@ export interface PendingPool {
   last_trade_time?: number;
   trade_count: number;
   reserve_changes: number;
+  initialize2_detected_at: number;
+  status_6_detected_at?: number;
 }
 
 @Injectable()
@@ -21,6 +28,7 @@ export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PendingPoolManager.name);
   private pendingPools: Map<string, PendingPool> = new Map();
   private checkInterval: NodeJS.Timeout | null = null;
+  private status6SubscriptionId: number | null = null;
   private readonly MAX_WAIT_TIME = 5 * 60 * 1000; // 5 minutes
   private readonly MAX_RETRIES = 3;
   private readonly CHECK_INTERVAL = 10000; // 10 seconds
@@ -35,7 +43,8 @@ export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly connection: Connection,
     onPoolReady: (pool: PendingPool) => void,
-    poolMonitorManager?: PoolMonitorManager
+    poolMonitorManager?: PoolMonitorManager,
+    private readonly socketService?: SocketService
   ) {
     this.onPoolReady = onPoolReady;
     this.poolMonitorManager = poolMonitorManager;
@@ -50,6 +59,9 @@ export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
       // Load pending pools from file
       await this.loadPendingPools();
       
+      // Start status 6 monitoring
+      await this.startStatus6Monitoring();
+      
       // Start monitoring for any pools that are already in indexed state
       this.startMonitoringForExistingIndexedPools();
     } catch (error) {
@@ -60,6 +72,16 @@ export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
 
   async onModuleDestroy() {
     this.logger.log('[PendingPoolManager] Shutting down...');
+    
+    // Remove status 6 subscription
+    if (this.status6SubscriptionId !== null) {
+      try {
+        await this.connection.removeProgramAccountChangeListener(this.status6SubscriptionId);
+        this.logger.log('[PendingPoolManager] Removed status 6 listener');
+      } catch (error) {
+        this.logger.error('[PendingPoolManager] Error removing status 6 listener:', error instanceof Error ? error.message : 'Unknown error');
+      }
+    }
     
     // Save pending pools to file before clearing
     await this.savePendingPools();
@@ -133,7 +155,9 @@ export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
           last_update_time: poolData.last_update_time,
           last_trade_time: poolData.last_trade_time,
           trade_count: poolData.trade_count,
-          reserve_changes: poolData.reserve_changes
+          reserve_changes: poolData.reserve_changes,
+          initialize2_detected_at: poolData.initialize2_detected_at,
+          status_6_detected_at: poolData.status_6_detected_at
         };
         
         this.pendingPools.set(pool.pool_id, pool);
@@ -165,7 +189,8 @@ export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
       state: 'pending',
       last_update_time: Date.now(),
       trade_count: 0,
-      reserve_changes: 0
+      reserve_changes: 0,
+      initialize2_detected_at: Date.now()
     });
 
     // Save to file after adding
@@ -440,6 +465,129 @@ export class PendingPoolManager implements OnModuleInit, OnModuleDestroy {
       });
     } else {
       this.logger.log('[PendingPoolManager] No valid indexed pools to monitor (all were older than 2 hours)');
+    }
+  }
+
+  private async startStatus6Monitoring() {
+    try {
+      this.logger.log('[PendingPoolManager] 🎯 Starting status 6 monitoring...');
+      
+      this.status6SubscriptionId = this.connection.onProgramAccountChange(
+        RAYDIUM_PROGRAM_ID,
+        async (updatedAccountInfo) => {
+          await this.handleStatus6Detection(updatedAccountInfo);
+        },
+        'confirmed',
+        [
+          { dataSize: LIQUIDITY_STATE_LAYOUT_V4.span },
+          { 
+            memcmp: { 
+              offset: LIQUIDITY_STATE_LAYOUT_V4.offsetOf('status'),
+              bytes: bs58.encode([6, 0, 0, 0, 0, 0, 0, 0]) // Status 6 in little-endian
+            }
+          }
+        ]
+      );
+
+      this.logger.log('[PendingPoolManager] ✅ Status 6 monitoring active');
+    } catch (error) {
+      this.logger.error('[PendingPoolManager] Failed to start status 6 monitoring:', error instanceof Error ? error.message : 'Unknown error');
+      throw error;
+    }
+  }
+
+  private async handleStatus6Detection(updatedAccountInfo: any) {
+    try {
+      const poolId = updatedAccountInfo.accountId.toString();
+      
+      // Check if this is a pool we're tracking
+      const pendingPool = this.pendingPools.get(poolId);
+      if (!pendingPool) {
+        return; // Not tracking this pool
+      }
+
+      // Decode the pool state
+      const poolState = decodeRaydiumPoolState(updatedAccountInfo.accountInfo.data);
+      if (!poolState) {
+        return;
+      }
+
+      // Verify it's actually status 6
+      if (poolState.status !== 6) {
+        return;
+      }
+
+      // Filter out legacy pools (poolOpenTime: 0)
+      if (poolState.poolOpenTime === 0) {
+        this.logger.debug(`[PendingPoolManager] Skipping legacy pool ${poolId} (poolOpenTime: 0)`);
+        return;
+      }
+
+      // Check if pool is actually open for trading
+      const currentTime = Math.floor(Date.now() / 1000);
+      if (currentTime < poolState.poolOpenTime) {
+        this.logger.debug(`[PendingPoolManager] Pool ${poolId} status 6 but not yet open`);
+        return;
+      }
+
+      // 🎯 STATUS 6 DETECTED FOR TRACKED POOL!
+      this.logger.log(`[PendingPoolManager] 🏌️‍♂️ SWING DETECTED! Pool ${poolId} hit status 6!`);
+      this.logger.log(`[PendingPoolManager] ⏱️  Time from initialize2 to status 6: ${Math.floor((Date.now() - pendingPool.initialize2_detected_at) / 1000)}s`);
+      
+      // Update pool state
+      pendingPool.status_6_detected_at = Date.now();
+      pendingPool.state = 'ready';
+      pendingPool.last_update_time = Date.now();
+
+      // Broadcast status 6 detection to port 5001
+      await this.broadcastStatus6Detection(pendingPool);
+
+      // Call the pool ready handler
+      this.onPoolReady(pendingPool);
+
+      // Remove from pending pools (mission accomplished)
+      this.pendingPools.delete(poolId);
+      this.logger.log(`[PendingPoolManager] ✅ Pool ${poolId} removed from pending list`);
+
+    } catch (error) {
+      this.logger.error(`[PendingPoolManager] Error handling status 6 detection:`, error instanceof Error ? error.message : 'Unknown error');
+    }
+  }
+
+  private async broadcastStatus6Detection(pool: PendingPool) {
+    try {
+      const timeFromInitialize2 = Math.floor((Date.now() - pool.initialize2_detected_at) / 1000);
+      
+      const message = {
+        event: 'status_6_detected',
+        pool_id: pool.pool_id,
+        timestamp: Date.now(),
+        data: {
+          base_token: pool.token_a.symbol,
+          quote_token: pool.token_b.symbol,
+          base_mint: pool.token_a.mint,
+          quote_mint: pool.token_b.mint,
+          time_from_initialize2_seconds: timeFromInitialize2,
+          initialize2_detected_at: new Date(pool.initialize2_detected_at).toISOString(),
+          status_6_detected_at: new Date(pool.status_6_detected_at!).toISOString(),
+          detection_method: 'hybrid_initialize2_to_status6'
+        }
+      };
+
+      // Broadcast to port 5001 via SocketService
+      this.logger.log(`[PendingPoolManager] 📢 Broadcasting status 6 detection to port 5001: ${pool.pool_id}`);
+      this.logger.log(`[PendingPoolManager] ⏱️  Time from initialize2 to status 6: ${timeFromInitialize2}s`);
+      
+      // Use the socket service to broadcast
+      if (this.socketService) {
+        this.socketService.broadcast('status_6_detected', message);
+      } else {
+        // Fallback: log the message
+        console.log('🚀 STATUS 6 DETECTED - SEND TO PORT 5001:', JSON.stringify(message, null, 2));
+      }
+
+    } catch (error) {
+      this.logger.error('[PendingPoolManager] Error broadcasting status 6 detection:', error instanceof Error ? error.message : 'Unknown error');
     }
   }
 } 

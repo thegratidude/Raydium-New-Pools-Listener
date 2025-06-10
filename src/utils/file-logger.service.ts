@@ -192,6 +192,7 @@ export class FileLoggerService implements LoggerService {
       'PendingPoolManager': colors.cyan,
       'PoolMonitorManager': colors.magenta,
       'RaydiumListener': colors.green,
+      'SimpleRaydiumListener': colors.orange,
       'Bootstrap': colors.bright + colors.white,
       'InstanceLoader': colors.gray,
       'RoutesResolver': colors.gray,

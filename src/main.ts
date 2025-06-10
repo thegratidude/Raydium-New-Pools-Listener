@@ -7,6 +7,7 @@ import { execSync } from 'child_process';
 import { Logger } from '@nestjs/common';
 import * as express from 'express';
 import { SocketService } from './gateway/socket.service';
+import { GatewayService } from './gateway/gateway.service';
 import { FileLoggerService } from './utils/file-logger.service';
 
 // Kill any process using port 5001 (macOS/Linux only)
@@ -68,6 +69,12 @@ async function bootstrap() {
   // Get the SocketService and set the Express app before app.init()
   const socketService = app.get(SocketService);
   socketService.setExpressApp(expressApp);
+
+  // Get the GatewayService and set the Express app for HTTP endpoints
+  const gatewayService = app.get(GatewayService);
+  if (gatewayService && typeof gatewayService.setExpressApp === 'function') {
+    gatewayService.setExpressApp(expressApp);
+  }
 
   // Configure logging with our file logger
   app.useLogger(fileLogger);

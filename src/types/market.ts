@@ -51,6 +51,27 @@ export interface PoolReadyMessage {
   };
 }
 
+export interface EnhancedPoolReadyMessage {
+  event: 'pool_ready';
+  pool_id: string;
+  timestamp: number;
+  data: {
+    base_token: string;
+    quote_token: string;
+    base_vault: string;
+    quote_vault: string;
+    base_decimals: number;
+    quote_decimals: number;
+    base_reserve: number;
+    quote_reserve: number;
+    price: number;
+    pool_open_time: number;
+    time_to_status_6_ms: number;
+    trade_count: number;
+    reserve_change_percent: number;
+  };
+}
+
 export interface PoolSnapshot {
   pool_id: string;
   timestamp: number;

@@ -34,7 +34,8 @@ export class PoolMonitorService implements OnModuleInit, OnModuleDestroy {
       this.pendingPoolManager = new PendingPoolManager(
         this.connection,
         this.handlePoolReady.bind(this),
-        this.poolMonitorManager
+        this.poolMonitorManager,
+        this.socketService
       );
 
       this.logger.log('✅ PoolMonitorService constructed with SocketService and PendingPoolManager');
@@ -201,5 +202,60 @@ export class PoolMonitorService implements OnModuleInit, OnModuleDestroy {
       this.logger.error(`Failed to remove pool ${poolId}:`, error instanceof Error ? error.message : 'Unknown error');
       throw error;
     }
+  }
+
+  // NEW: Method to handle initialize2 detection (called by NestJS listener)
+  public onInitialize2Detected(poolId: string, baseMint: string, quoteMint: string): void {
+    try {
+      if (!this.isInitialized) {
+        throw new Error('PoolMonitorService not initialized');
+      }
+
+      this.logger.log(`[PoolMonitorService] 🏌️‍♂️ INITIALIZE2 DETECTED: ${poolId}`);
+      this.logger.log(`[PoolMonitorService] Base mint: ${baseMint}`);
+      this.logger.log(`[PoolMonitorService] Quote mint: ${quoteMint}`);
+
+      // Create token info objects
+      const tokenAInfo: TokenInfo = { 
+        symbol: 'TOKEN_A', 
+        decimals: 9, 
+        mint: baseMint 
+      };
+      
+      const tokenBInfo: TokenInfo = { 
+        symbol: 'TOKEN_B', 
+        decimals: 6, 
+        mint: quoteMint 
+      };
+
+      // Add to pending pools (this will track for status 6)
+      this.pendingPoolManager.addPool(poolId, tokenAInfo, tokenBInfo);
+      
+      this.logger.log(`[PoolMonitorService] ✅ Pool ${poolId} added to pending list - waiting for status 6`);
+
+    } catch (error) {
+      this.logger.error(`[PoolMonitorService] Error handling initialize2 for ${poolId}:`, error instanceof Error ? error.message : 'Unknown error');
+    }
+  }
+
+  // NEW: Get pending pools with their status
+  public getPendingPoolsWithStatus() {
+    if (!this.isInitialized) {
+      throw new Error('PoolMonitorService not initialized');
+    }
+    
+    const pools = this.pendingPoolManager.getAllPools();
+    return pools.map(pool => ({
+      pool_id: pool.pool_id,
+      base_token: pool.token_a.symbol,
+      quote_token: pool.token_b.symbol,
+      base_mint: pool.token_a.mint,
+      quote_mint: pool.token_b.mint,
+      state: pool.state,
+      initialize2_detected_at: new Date(pool.initialize2_detected_at).toISOString(),
+      time_since_initialize2: Math.floor((Date.now() - pool.initialize2_detected_at) / 1000),
+      status_6_detected: pool.status_6_detected_at ? true : false,
+      status_6_detected_at: pool.status_6_detected_at ? new Date(pool.status_6_detected_at).toISOString() : null
+    }));
   }
 } 

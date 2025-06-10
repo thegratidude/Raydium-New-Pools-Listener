@@ -227,7 +227,7 @@ export class PoolMonitor {
   private isSimulation: boolean;
   private lastUpdate: number = 0;
   protected updateInterval: number = 1000; // Reduced to 1 second for faster detection
-  private initialReserveRatio: number | null = null;
+  protected initialReserveRatio: number | null = null;
   private retryCount: number = 0;
   private readonly MAX_RETRIES = 5;
   private readonly RETRY_DELAY = 2000;
@@ -243,11 +243,11 @@ export class PoolMonitor {
   private tradeCount: number = 0;
   private readonly TRADE_THRESHOLD = 1; // Ready after first reserve change
   private readonly TRADE_WINDOW = 30000; // 30 seconds window
-  protected readonly RESERVE_CHANGE_THRESHOLD = 0.0005; // 0.05% - ultra sensitive for early detection
+  protected RESERVE_CHANGE_THRESHOLD = 0.0005; // 0.05% - ultra sensitive for early detection
   
   // Polling tracking
-  private pollCount: number = 0;
-  private lastPollLogTime: number = 0;
+  protected pollCount: number = 0;
+  protected lastPollLogTime: number = 0;
   
   // Add retry limit for unindexed pools
   private readonly MAX_UNINDEXED_RETRIES = 3;
@@ -258,7 +258,12 @@ export class PoolMonitor {
   protected hasDetectedActivity: boolean = false;
 
   // Add initial price tracking for position monitoring
-  private initialPrice: number | null = null;
+  protected baselinePrice: number | null = null;
+  protected lastShownPrice: number | null = null; // Track last price we showed output for
+
+  // Add heartbeat tracking
+  protected lastHeartbeat: number = 0;
+  protected readonly HEARTBEAT_INTERVAL = 60000; // 60 seconds
 
   constructor(options: PoolMonitorOptions) {
     this.connection = new Connection(options.httpUrl, {
@@ -273,13 +278,13 @@ export class PoolMonitor {
   }
 
   // Add method to get colored percentage change
-  private getColoredPercentage(currentPrice: number): string {
-    if (this.initialPrice === null) {
-      this.initialPrice = currentPrice;
+  protected getColoredPercentage(currentPrice: number): string {
+    if (this.baselinePrice === null) {
+      this.baselinePrice = currentPrice;
       return '(0.00%)'; // First reading, no change
     }
 
-    const percentageChange = ((currentPrice - this.initialPrice) / this.initialPrice) * 100;
+    const percentageChange = ((currentPrice - this.baselinePrice) / this.baselinePrice) * 100;
     const formattedChange = percentageChange.toFixed(2);
     
     if (percentageChange > 0) {
@@ -387,9 +392,15 @@ export class PoolMonitor {
         return;
       }
 
-      // Log current reserves every 10 seconds for debugging
-      if (!this.lastUpdate || (now - this.lastUpdate) > 10000) {
-        // Only show output if not in silent mode
+      // Calculate current price and check for changes
+      const currentPrice = quoteReserve / baseReserve;
+      const hasPriceChange = this.detectPriceChange(currentPrice);
+      const hasReserveChange = this.detectReserveChange(baseReserve, quoteReserve);
+      
+      // Only show output if there are actual changes AND it's a new change from last shown
+      const isNewChange = this.isNewChange(currentPrice);
+      
+      if ((hasPriceChange || hasReserveChange) && isNewChange) {
         if (!this.isSilentMode) {
           // Calculate % change in reserves
           let baseChange = 0;
@@ -400,133 +411,21 @@ export class PoolMonitor {
             quoteChange = ((quoteReserve - this.lastQuoteReserve) / this.lastQuoteReserve) * 100;
           }
           
-          // Simple concise output - just the % changes
-          const currentPrice = quoteReserve / baseReserve;
+          // Show colored output only when there are new changes
           const pricePercentage = this.getColoredPercentage(currentPrice);
           console.log(`📊 ${this.tokenA.symbol}/${this.tokenB.symbol} | Price: $${currentPrice.toFixed(8)} ${pricePercentage} | Base: ${baseChange.toFixed(4)}% | Quote: ${quoteChange.toFixed(4)}%`);
-        }
-        this.lastUpdate = now;
-      }
-
-      // Log previous reserves for comparison
-      if (this.lastBaseReserve !== null && this.lastQuoteReserve !== null) {
-        const baseChange = Math.abs((baseReserve - this.lastBaseReserve) / this.lastBaseReserve);
-        const quoteChange = Math.abs((quoteReserve - this.lastQuoteReserve) / this.lastQuoteReserve);
-        // Remove verbose logging - just keep the concise line above
-      }
-
-      // Detect reserve changes (this is the key insight!)
-      const hasReserveChange = this.detectReserveChange(baseReserve, quoteReserve);
-      
-      if (hasReserveChange) {
-        // Switch from silent mode to active mode when activity detected
-        if (this.isSilentMode) {
-          this.isSilentMode = false;
-          this.hasDetectedActivity = true;
-          this.logger.log(`🚨 ACTIVITY DETECTED for ${this.poolId.toBase58().substring(0, 8)}... - switching to active monitoring!`);
-        }
-        
-        this.logger.log(`🚨 RESERVE CHANGE DETECTED for ${this.poolId.toBase58().substring(0, 8)}...!`);
-        this.tradeCount++;
-        
-        if (!this.firstTradeTime) {
-          this.firstTradeTime = Date.now();
-          this.logger.log(`🔥 FIRST TRADE DETECTED for pool ${this.poolId.toBase58().substring(0, 8)}... - IMMEDIATE NOTIFICATION!`);
-          this.logger.log(`  Initial reserves: ${baseReserve} ${this.tokenA.symbol} / ${quoteReserve} ${this.tokenB.symbol}`);
           
-          // IMMEDIATE NOTIFICATION for early entry - no waiting!
-          this.onUpdate({
-            pool_id: this.poolId.toString(),
-            base_token: this.tokenA.symbol,
-            quote_token: this.tokenB.symbol,
-            base_reserve: baseReserve,
-            quote_reserve: quoteReserve,
-            price: quoteReserve / baseReserve,
-            tvl: quoteReserve * 2,
-            market_pressure: this.calculateMarketPressure({
-              poolId: this.poolId.toString(),
-              timestamp: Date.now(),
-              slot: 0,
-              baseReserve: baseReserve,
-              quoteReserve: quoteReserve,
-              price: quoteReserve / baseReserve,
-              priceChange: 0,
-              tvl: quoteReserve * 2,
-              marketCap: 0,
-              volumeChange: 0,
-              volume24h: pool.day?.volume || 0,
-              suspicious: false,
-              baseDecimals: pool.mintA.decimals || 9,
-              quoteDecimals: pool.mintB.decimals || 6,
-              buySlippage: 0,
-              sellSlippage: 0,
-              reserveRatio: quoteReserve / baseReserve,
-              initialReserveRatio: this.initialReserveRatio,
-              ratioChange: 0
-            }).value,
-            trade_count: 1,
-            reserve_change_percent: 0.05, // Small change detected
-            time_since_first_trade: 0,
-            has_trade_data: true,
-            timestamp: Date.now()
-          });
-        } else {
-          const timeSinceFirstTrade = Date.now() - this.firstTradeTime;
-          this.logger.log(`Trade #${this.tradeCount} detected (${timeSinceFirstTrade/1000}s since first trade)`);
-        }
-
-        // Calculate reserve changes for additional trades
-        const baseReserveChange = this.lastBaseReserve ? 
-          Math.abs(((baseReserve - this.lastBaseReserve) / this.lastBaseReserve) * 100) : 0;
-        const quoteReserveChange = this.lastQuoteReserve ? 
-          Math.abs(((quoteReserve - this.lastQuoteReserve) / this.lastQuoteReserve) * 100) : 0;
-        const maxReserveChange = Math.max(baseReserveChange, quoteReserveChange);
-
-        // For subsequent trades, still notify but with more data
-        if (this.tradeCount > 1) {
-          const timeSinceFirstTrade = Date.now() - (this.firstTradeTime || 0);
-          
-          this.logger.log(`🎯 Additional trade #${this.tradeCount} for pool ${this.poolId.toBase58().substring(0, 8)}... - ${maxReserveChange.toFixed(2)}% reserve change`);
-          
-          this.onUpdate({
-            pool_id: this.poolId.toString(),
-            base_token: this.tokenA.symbol,
-            quote_token: this.tokenB.symbol,
-            base_reserve: baseReserve,
-            quote_reserve: quoteReserve,
-            price: quoteReserve / baseReserve,
-            tvl: quoteReserve * 2,
-            market_pressure: this.calculateMarketPressure({
-              poolId: this.poolId.toString(),
-              timestamp: Date.now(),
-              slot: 0,
-              baseReserve: baseReserve,
-              quoteReserve: quoteReserve,
-              price: quoteReserve / baseReserve,
-              priceChange: 0,
-              tvl: quoteReserve * 2,
-              marketCap: 0,
-              volumeChange: 0,
-              volume24h: pool.day?.volume || 0,
-              suspicious: false,
-              baseDecimals: pool.mintA.decimals || 9,
-              quoteDecimals: pool.mintB.decimals || 6,
-              buySlippage: 0,
-              sellSlippage: 0,
-              reserveRatio: quoteReserve / baseReserve,
-              initialReserveRatio: this.initialReserveRatio,
-              ratioChange: 0
-            }).value,
-            trade_count: this.tradeCount,
-            reserve_change_percent: maxReserveChange,
-            time_since_first_trade: timeSinceFirstTrade,
-            has_trade_data: true,
-            timestamp: Date.now()
-          });
+          // Update last shown price to prevent repeating
+          this.lastShownPrice = currentPrice;
         }
       } else {
-        // Log when no change is detected - removed verbose logging
-        // this.logger.log(`[PoolMonitor] ✅ No reserve change for ${this.poolId.toBase58().substring(0, 8)}...`);
+        // No changes detected - check for heartbeat
+        if (!this.lastHeartbeat || (now - this.lastHeartbeat) > this.HEARTBEAT_INTERVAL) {
+          if (!this.isSilentMode) {
+            console.log(`💓 ${this.tokenA.symbol}/${this.tokenB.symbol} | Still monitoring... (${this.pollCount} polls, no changes in 60s)`);
+          }
+          this.lastHeartbeat = now;
+        }
       }
 
       // Update last reserves for next comparison
@@ -558,8 +457,35 @@ export class PoolMonitor {
     const baseChange = Math.abs((baseReserve - this.lastBaseReserve) / this.lastBaseReserve);
     const quoteChange = Math.abs((quoteReserve - this.lastQuoteReserve) / this.lastQuoteReserve);
     
-    // Ultra-sensitive detection for early entry - detect changes as small as 0.05%
-    return baseChange > this.RESERVE_CHANGE_THRESHOLD || quoteChange > this.RESERVE_CHANGE_THRESHOLD;
+    // No threshold - detect ANY change
+    return baseChange > 0 || quoteChange > 0;
+  }
+
+  protected detectPriceChange(currentPrice: number): boolean {
+    // If this is the first time we're seeing a price, it's not a change
+    if (this.baselinePrice === null) {
+      this.baselinePrice = currentPrice;
+      return false;
+    }
+
+    // Calculate percentage change from baseline
+    const priceChange = Math.abs((currentPrice - this.baselinePrice) / this.baselinePrice);
+    
+    // No threshold - detect ANY price change
+    return priceChange > 0;
+  }
+
+  protected isNewChange(currentPrice: number): boolean {
+    // If we haven't shown any price yet, this is a new change
+    if (this.lastShownPrice === null) {
+      return true;
+    }
+    
+    // Check if this price is different from the last shown price
+    const priceDifference = Math.abs(currentPrice - this.lastShownPrice);
+    
+    // No threshold - show if there's ANY difference
+    return priceDifference > 0;
   }
 
   private handleError(error: any) {

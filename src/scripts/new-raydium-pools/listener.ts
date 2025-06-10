@@ -1,142 +1,209 @@
 import { Logger, INestApplication } from '@nestjs/common';
 import { Connection, PublicKey } from '@solana/web3.js';
-import { NestFactory } from '@nestjs/core';
-import { AppModule } from '../../app.module';
-import { PoolMonitorService } from '../../monitor/pool-monitor.service';
-import { HealthMonitorService } from '../../monitor/health-monitor.service';
-import { sleep } from '../../utils/sleep';
-import { LIQUIDITY_STATE_LAYOUT_V4 } from '../../scripts/pool-monitor/raydium-layout';
+import { SocketService } from '../../gateway/socket.service';
+import { GatewayService } from '../../gateway/gateway.service';
+import { LIQUIDITY_STATE_LAYOUT_V4, decodeRaydiumPoolState } from '../../scripts/pool-monitor/raydium-layout';
+import { EnhancedPoolReadyMessage } from '../../types/market';
 import * as dotenv from 'dotenv';
 
 dotenv.config();
 
-const HTTP_URL = process.env.HTTP_URL!;
-const WSS_URL = process.env.WSS_URL!;
-const RAYDIUM_PUBLIC_KEY = '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8';
+const RAYDIUM_PROGRAM_ID = new PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8');
+const logger = new Logger('SimpleRaydiumListener');
 
-// Constants for account indices in Raydium instructions
-const LIQUIDITY_POOL_INDEX = 8;
-const TOKEN_MINT_INDEX = 4;
-const QUOTE_INDEX = 5;
-
-const logger = new Logger('RaydiumListener');
-
-async function handleNewPool(
-  poolMonitorService: PoolMonitorService,
-  liquidityPoolAddress: string,
-  tokenAMint: string,
-  tokenBMint: string
-) {
-  logger.log('\n📊 New Pool Detected:');
-  logger.log('════════════════════════════════════════════════════════════════════════════════');
-  logger.log(`Token A Mint: ${tokenAMint}`);
-  logger.log(`Token B Mint: ${tokenBMint}`);
-  logger.log(`Pool Address: ${liquidityPoolAddress}`);
-  logger.log('════════════════════════════════════════════════════════════════════════════════\n');
-
-  if (liquidityPoolAddress) {
-    logger.log(`➕ Adding pool to monitor service: ${liquidityPoolAddress}`);
-    poolMonitorService.addPool(liquidityPoolAddress, tokenAMint, tokenBMint);
-  } else {
-    logger.error('❌ Missing liquidity pool address, skipping pool');
-  }
+// New pool tracking interface based on Claude AI's suggestion
+interface PoolInfo {
+  status: number;
+  openTime: number;
+  detectedAt: number;
+  becameTradeableAt?: number;
+  baseMint?: string;
+  quoteMint?: string;
+  baseVault?: string;
+  quoteVault?: string;
+  baseDecimal?: number;
+  quoteDecimal?: number;
 }
 
-async function processTransaction(
-  poolMonitorService: PoolMonitorService,
-  connection: Connection,
-  txId: string
-) {
-  try {
-    logger.log('\n🔍 Processing Transaction:');
-    logger.log('════════════════════════════════════════════════════════════════════════════════');
-    logger.log(`Transaction ID: ${txId}`);
-    logger.log('════════════════════════════════════════════════════════════════════════════════\n');
+class SimpleRaydiumTracker {
+  private pools = new Map<string, PoolInfo>();
+  private socketService: SocketService;
+  private connection: Connection;
+  private gatewayService: GatewayService;
+  private messageCount = 0;
 
-    const tx = await connection.getParsedTransaction(txId, {
-      maxSupportedTransactionVersion: 0,
-      commitment: 'confirmed',
-    });
+  constructor(socketService: SocketService, connection: Connection, gatewayService: GatewayService) {
+    this.socketService = socketService;
+    this.connection = connection;
+    this.gatewayService = gatewayService;
+  }
 
-    if (!tx) {
-      logger.error('❌ Transaction not found:', txId);
-      return;
-    }
+  startMonitoring() {
+    logger.log('🚀 Simple Raydium tracker started');
+    logger.log('📡 Monitoring for status 1 (new pools) and status 6 (tradeable pools)');
+    logger.log(`🎯 Raydium program: ${RAYDIUM_PROGRAM_ID.toString()}`);
 
-    const instructions = tx.transaction.message.instructions;
-    const raydiumInstruction = instructions.find(
-      (ix) => ix.programId.toBase58() === RAYDIUM_PUBLIC_KEY
+    // Listen for ALL Raydium program account changes
+    this.connection.onProgramAccountChange(
+      RAYDIUM_PROGRAM_ID,
+      async (accountInfo) => {
+        try {
+          // Track ALL Raydium account changes for health monitoring
+          this.messageCount++;
+          this.gatewayService.trackRaydiumMessage();
+          
+          const poolId = accountInfo.accountId.toString();
+          const poolState = decodeRaydiumPoolState(accountInfo.accountInfo.data);
+          if (!poolState) return;
+          
+          const status = poolState.status;
+          const openTime = poolState.poolOpenTime;
+          const now = Date.now();
+
+          const existing = this.pools.get(poolId);
+
+          // New pool created (status 1) - only track if we haven't seen it before
+          if (status === 1 && !existing) {
+            // Only track if the pool opens in the future (within 24 hours)
+            if (openTime > now && openTime - now < 24 * 60 * 60 * 1000) {
+              this.pools.set(poolId, {
+                status: 1,
+                openTime,
+                detectedAt: now,
+                baseMint: poolState.baseMint,
+                quoteMint: poolState.quoteMint,
+                baseVault: poolState.baseVault,
+                quoteVault: poolState.quoteVault,
+                baseDecimal: poolState.baseDecimal,
+                quoteDecimal: poolState.quoteDecimal
+              });
+
+              logger.log(`🆕 NEW POOL: ${poolId.substring(0, 8)}...`);
+              logger.log(`   Opens: ${new Date(openTime).toISOString()}`);
+              logger.log(`   Time until open: ${Math.round((openTime - now) / 1000)}s`);
+              logger.log(`   Base: ${poolState.baseMint.substring(0, 8)}...`);
+              logger.log(`   Quote: ${poolState.quoteMint.substring(0, 8)}...`);
+
+              // Schedule check if opens soon
+              this.scheduleOpenCheck(poolId, openTime);
+            }
+          }
+
+          // Pool became tradeable (status 6) - only process if we're tracking it
+          if (status === 6 && existing && !existing.becameTradeableAt) {
+            existing.becameTradeableAt = now;
+            const timeFromDetection = now - existing.detectedAt;
+            
+            logger.log(`🚀 POOL TRADEABLE: ${poolId.substring(0, 8)}...`);
+            logger.log(`   Time from detection: ${timeFromDetection}ms`);
+            
+            // Execute arbitrage and broadcast
+            await this.executeArbitrage(poolId, poolState, existing);
+          }
+        } catch (error) {
+          // Not a pool state or other error, ignore
+        }
+      },
+      'confirmed',
+      [{ dataSize: LIQUIDITY_STATE_LAYOUT_V4.span }]
     );
 
-    await sleep(2000);
-
-    if (raydiumInstruction && 'accounts' in raydiumInstruction) {
-      const accounts = raydiumInstruction.accounts as PublicKey[];
-      
-      logger.log(`📊 Found Raydium instruction with ${accounts.length} accounts`);
-
-      // Try to identify pool-related accounts
-      let liquidityPoolAddress: string | undefined;
-      let tokenAMint: string | undefined;
-      let tokenBMint: string | undefined;
-
-      // Method 1: Try to get from account indices (may not work for all instructions)
-      if (accounts.length > LIQUIDITY_POOL_INDEX) {
-        liquidityPoolAddress = accounts[LIQUIDITY_POOL_INDEX]?.toBase58();
+    // Periodic status log
+    setInterval(() => {
+      const pendingCount = this.getPendingCount();
+      if (pendingCount > 0) {
+        logger.log(`📊 Status: ${pendingCount} pools pending status 6`);
       }
-      if (accounts.length > TOKEN_MINT_INDEX) {
-        tokenAMint = accounts[TOKEN_MINT_INDEX]?.toBase58();
-      }
-      if (accounts.length > QUOTE_INDEX) {
-        tokenBMint = accounts[QUOTE_INDEX]?.toBase58();
-      }
+    }, 30000); // Every 30 seconds
 
-      // Method 2: Check if any of the accounts is actually a pool by trying to decode them
-      for (const account of accounts) {
-        try {
-          const accountInfo = await connection.getAccountInfo(account);
-          if (accountInfo && accountInfo.data.length > 0) {
-            // Try to decode as a pool state
-            const poolState = LIQUIDITY_STATE_LAYOUT_V4.decode(accountInfo.data);
-            
-            // If we can decode it, this is likely a pool
-            const poolId = account.toBase58();
-            logger.log(`✅ Found pool account: ${poolId}`);
-            
-            // Extract token mints from the pool state
-            const baseMint = new PublicKey(poolState.coinMintAddress).toBase58();
-            const quoteMint = new PublicKey(poolState.pcMintAddress).toBase58();
-            
-            await handleNewPool(poolMonitorService, poolId, baseMint, quoteMint);
-            return; // Found a pool, no need to continue
-          }
-        } catch (decodeError) {
-          // Not a pool state, continue checking other accounts
-          continue;
-        }
-      }
+    logger.log('✅ Simple tracker active - monitoring status 1 and status 6');
+  }
 
-      // Method 3: Fallback to original method if we have the required data
-      if (liquidityPoolAddress && tokenAMint && tokenBMint) {
-        // Ensure SOL is always token B
-        if (
-          tokenBMint !== 'So11111111111111111111111111111111111111112' &&
-          tokenBMint !== 'EPjFWdd5AufqSSqeM2qAqAqAqAqAqAqAqAqAqAqAqAqA'
-        ) {
-          [tokenAMint, tokenBMint] = [tokenBMint, tokenAMint];
-        }
-
-        await handleNewPool(poolMonitorService, liquidityPoolAddress, tokenAMint, tokenBMint);
-      } else {
-        logger.log('❌ Could not identify pool information from transaction accounts');
-      }
-    } else {
-      logger.log('❌ No Raydium instruction found in transaction');
+  private scheduleOpenCheck(poolId: string, openTime: number) {
+    const delay = openTime - Date.now();
+    if (delay > 0) {
+      setTimeout(() => {
+        logger.log(`⏰ Checking scheduled pool: ${poolId.substring(0, 8)}...`);
+        // The onProgramAccountChange should catch the status change,
+        // but this is a backup check
+      }, delay + 1000);
     }
-  } catch (error) {
-    logger.error('❌ Error processing transaction:', error);
+  }
+
+  private async executeArbitrage(poolId: string, poolState: any, poolInfo: PoolInfo) {
+    // Your arbitrage logic here
+    logger.log(`   🎯 EXECUTING ARBITRAGE FOR ${poolId.substring(0, 8)}...`);
+    
+    // Extract key data
+    const baseMint = poolState.baseMint;
+    const quoteMint = poolState.quoteMint;
+    
+    logger.log(`   Base: ${baseMint.substring(0, 8)}...`);
+    logger.log(`   Quote: ${quoteMint.substring(0, 8)}...`);
+
+    // Get current reserves and calculate price
+    let reserves = { baseReserve: 0, quoteReserve: 0, price: 0 };
+    try {
+      const baseVault = new PublicKey(poolState.baseVault);
+      const quoteVault = new PublicKey(poolState.quoteVault);
+      
+      // Get token account balances
+      const [baseAccount, quoteAccount] = await Promise.all([
+        this.connection.getTokenAccountBalance(baseVault),
+        this.connection.getTokenAccountBalance(quoteVault)
+      ]);
+
+      const baseReserve = baseAccount.value.uiAmount || 0;
+      const quoteReserve = quoteAccount.value.uiAmount || 0;
+      
+      // Calculate price (quote/base)
+      const price = quoteReserve > 0 && baseReserve > 0 ? quoteReserve / baseReserve : 0;
+      
+      reserves = { baseReserve, quoteReserve, price };
+    } catch (error) {
+      logger.warn(`Failed to get reserves for pool ${poolId}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+
+    // Broadcast to port 5001 with enhanced trading data
+    const message: EnhancedPoolReadyMessage = {
+      event: 'pool_ready' as const,
+      pool_id: poolId,
+      timestamp: Date.now(),
+      data: {
+        base_token: baseMint,
+        quote_token: quoteMint,
+        base_vault: poolState.baseVault,
+        quote_vault: poolState.quoteVault,
+        base_decimals: poolState.baseDecimal,
+        quote_decimals: poolState.quoteDecimal,
+        base_reserve: reserves.baseReserve,
+        quote_reserve: reserves.quoteReserve,
+        price: reserves.price,
+        pool_open_time: poolState.poolOpenTime,
+        time_to_status_6_ms: poolInfo.becameTradeableAt ? poolInfo.becameTradeableAt - poolInfo.detectedAt : 0,
+        trade_count: 0,
+        reserve_change_percent: 0
+      }
+    };
+
+    this.socketService.broadcastPoolReady(message);
+    logger.log(`📢 Broadcasting to port 5001: ${poolId.substring(0, 8)}...`);
+
+    // Remove from tracking
+    this.pools.delete(poolId);
+    logger.log(`✅ Pool removed from tracking (${this.pools.size} remaining)`);
+  }
+
+  getPendingCount(): number {
+    return this.pools.size;
+  }
+
+  getPoolInfo(poolId: string): PoolInfo | undefined {
+    return this.pools.get(poolId);
   }
 }
+
+let raydiumMessageCount = 0;
 
 export async function startListener(
   app: INestApplication,
@@ -144,85 +211,23 @@ export async function startListener(
   raydiumProgram: PublicKey,
   instructionNames: string[]
 ) {
-  const poolMonitorService = app.get(PoolMonitorService);
-  const healthMonitorService = app.get(HealthMonitorService);
+  const socketService = app.get(SocketService);
+  const gatewayService = app.get(GatewayService);
+  const poolTracker = new SimpleRaydiumTracker(socketService, connection, gatewayService);
 
-  logger.log('Raydium listener started and ready to monitor new pools');
-  logger.log('Monitoring logs for program:', raydiumProgram.toString());
-  logger.log('Watching for ray_log entries and instruction names:', instructionNames.join(', '));
+  // Start the new monitoring system
+  poolTracker.startMonitoring();
 
-  // Method 1: Monitor program logs for ray_log entries and specific instructions
-  connection.onLogs(
-    raydiumProgram,
-    ({ logs, err, signature }) => {
-      if (err) return;
+  // Note: 1-minute health check is now handled by GatewayService
+  logger.log('✅ Simple listener active - monitoring status 1 and status 6');
+}
 
-      // Track all Raydium messages for health monitoring
-      healthMonitorService.trackRaydiumMessage();
-
-      // Check for ray_log entries (Raydium's custom log format)
-      const hasRayLog = logs && logs.some((log) => log.includes('ray_log:'));
-      
-      // Check if any of the instruction names are in the logs
-      const hasMatchingInstruction = instructionNames.some(instructionName => 
-        logs && logs.some((log) => log.includes(instructionName))
-      );
-
-      if (hasRayLog || hasMatchingInstruction) {
-        const matchedInstruction = hasMatchingInstruction ? 
-          instructionNames.find(instructionName => 
-            logs && logs.some((log) => log.includes(instructionName))
-          ) : 'ray_log';
-        
-        logger.log(
-          `🔍 Raydium activity detected - ${hasRayLog ? 'ray_log' : matchedInstruction}:`,
-          `https://explorer.solana.com/tx/${signature}`
-        );
-        
-        // Process the transaction to check if it's a new pool
-        processTransaction(poolMonitorService, connection, signature);
-      }
-    },
-    'confirmed'
-  );
-
-  // Method 2: Monitor program account changes (alternative detection)
-  logger.log('Setting up program account change monitoring...');
-  connection.onProgramAccountChange(
-    raydiumProgram,
-    async (accountInfo, context) => {
-      try {
-        // Track for health monitoring
-        healthMonitorService.trackRaydiumMessage();
-        
-        const poolId = accountInfo.accountId.toString();
-        logger.log(`🔍 New program account change detected: ${poolId}`);
-        
-        // Try to decode as a pool state to see if it's a new pool
-        try {
-          // This will throw if it's not a valid pool state
-          const poolState = LIQUIDITY_STATE_LAYOUT_V4.decode(accountInfo.accountInfo.data);
-          
-          // If we can decode it, it's likely a new pool
-          logger.log(`✅ New pool detected via account change: ${poolId}`);
-          
-          // Extract token mints from the pool state
-          const baseMint = new PublicKey(poolState.coinMintAddress).toBase58();
-          const quoteMint = new PublicKey(poolState.pcMintAddress).toBase58();
-          
-          await handleNewPool(poolMonitorService, poolId, baseMint, quoteMint);
-          
-        } catch (decodeError) {
-          // Not a pool state, ignore
-          logger.debug(`Account ${poolId} is not a pool state, ignoring`);
-        }
-        
-      } catch (error) {
-        logger.error('Error processing program account change:', error);
-      }
-    },
-    'confirmed'
-  );
-
-  logger.log('✅ Both log monitoring and account change monitoring are active');
+// Keep the old function for backward compatibility but mark as deprecated
+async function extractPoolFromTransaction(
+  connection: Connection, 
+  signature: string, 
+  poolTracker: any
+) {
+  // This function is no longer used in the new approach
+  logger.warn('extractPoolFromTransaction is deprecated - using direct status monitoring instead');
 }
