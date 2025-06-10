@@ -24,11 +24,8 @@ const WSS_URL = process.env.WSS_URL || 'wss://api.mainnet-beta.solana.com';
         commitment: 'confirmed'
       })
     },
-    // NEW: Unified pool monitoring service
     UnifiedPoolMonitorService
   ],
-  exports: [
-    UnifiedPoolMonitorService
-  ]
+  exports: [UnifiedPoolMonitorService]
 })
 export class MonitorModule {} 

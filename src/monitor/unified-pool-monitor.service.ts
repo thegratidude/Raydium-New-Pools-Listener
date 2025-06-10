@@ -1,6 +1,7 @@
 import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { Connection, PublicKey } from '@solana/web3.js';
 import { SocketService } from '../gateway/socket.service';
+import { GatewayService } from '../gateway/gateway.service';
 import { TokenInfo } from '../types/token';
 import { LIQUIDITY_STATE_LAYOUT_V4, decodeRaydiumPoolState } from './raydium-layout';
 import bs58 from 'bs58';
@@ -15,6 +16,7 @@ export interface PoolState {
   pool_open_time: number;
   detected_at: number;
   status_1_detected_at?: number;
+  status6SubscriptionId?: number; // NEW: Individual listener for this pool
 }
 
 export interface PoolEvent {
@@ -31,10 +33,14 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
   // Core state
   private isInitialized = false;
   private status1SubscriptionId: number | null = null;
-  private status6SubscriptionId: number | null = null;
+  private logsSubscriptionId: number | null = null; // For health monitoring only
   
   // Pool tracking - only pending pools (status 1 waiting for status 6)
   private pendingPools: Map<string, PoolState> = new Map();
+  
+  // NEW: Message tracking for health monitoring
+  private messageCount = 0;
+  private lastMessageTime = Date.now();
   
   // Configuration
   private readonly config = {
@@ -50,40 +56,41 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
 
   constructor(
     private readonly connection: Connection,
-    private readonly socketService: SocketService
+    private readonly socketService: SocketService,
+    private readonly gatewayService: GatewayService
   ) {
-    this.logger.log('[UnifiedPoolMonitorService] Initializing unified pool monitor...');
+    this.logger.log('Initializing unified pool monitor...');
   }
 
   async onModuleInit() {
     try {
-      this.logger.log('[UnifiedPoolMonitorService] Starting unified pool monitoring...');
+      this.logger.log('Starting unified pool monitoring...');
       
       // Wait for SocketService to be ready
       await this.waitForSocketService();
       
+      // Start logs monitoring for health tracking (silent)
+      await this.startLogsMonitoring();
+      
       // Start monitoring for status 1 pools
       await this.startStatus1Monitoring();
-      
-      // Start monitoring for status 6 transitions
-      await this.startStatus6Monitoring();
       
       // Start background tasks
       this.startCleanupTask();
       this.startHealthCheckTask();
       
       this.isInitialized = true;
-      this.logger.log('[UnifiedPoolMonitorService] ✅ Unified monitoring active');
-      this.logger.log('[UnifiedPoolMonitorService] 🎯 Monitoring: Status 1 → Status 6 → Broadcast');
+      this.logger.log('✅ Unified monitoring active');
+      this.logger.log('🎯 Monitoring: Logs (health) + Status 1 → Individual Status 6 listeners');
       
     } catch (error) {
-      this.logger.error('[UnifiedPoolMonitorService] Failed to initialize:', error instanceof Error ? error.message : 'Unknown error');
+      this.logger.error('Failed to initialize:', error instanceof Error ? error.message : 'Unknown error');
       throw error;
     }
   }
 
   async onModuleDestroy() {
-    this.logger.log('[UnifiedPoolMonitorService] Shutting down...');
+    this.logger.log('Shutting down...');
     
     // Stop timers
     if (this.cleanupTimer) {
@@ -96,22 +103,34 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
       this.healthCheckTimer = null;
     }
     
-    // Remove subscriptions
-    if (this.status1SubscriptionId !== null) {
-      try {
-        await this.connection.removeProgramAccountChangeListener(this.status1SubscriptionId);
-        this.logger.log('[UnifiedPoolMonitorService] Removed status 1 listener');
-      } catch (error) {
-        this.logger.error('[UnifiedPoolMonitorService] Error removing status 1 listener:', error instanceof Error ? error.message : 'Unknown error');
+    // Remove individual pool listeners
+    for (const [poolId, pool] of this.pendingPools.entries()) {
+      if (pool.status6SubscriptionId) {
+        try {
+          await this.connection.removeProgramAccountChangeListener(pool.status6SubscriptionId);
+          this.logger.log(`Removed individual listener for pool: ${poolId}`);
+        } catch (error) {
+          this.logger.error(`Error removing listener for pool ${poolId}:`, error instanceof Error ? error.message : 'Unknown error');
+        }
       }
     }
     
-    if (this.status6SubscriptionId !== null) {
+    // Remove subscriptions
+    if (this.logsSubscriptionId !== null) {
       try {
-        await this.connection.removeProgramAccountChangeListener(this.status6SubscriptionId);
-        this.logger.log('[UnifiedPoolMonitorService] Removed status 6 listener');
+        await this.connection.removeOnLogsListener(this.logsSubscriptionId);
+        this.logger.log('Removed logs listener');
       } catch (error) {
-        this.logger.error('[UnifiedPoolMonitorService] Error removing status 6 listener:', error instanceof Error ? error.message : 'Unknown error');
+        this.logger.error('Error removing logs listener:', error instanceof Error ? error.message : 'Unknown error');
+      }
+    }
+    
+    if (this.status1SubscriptionId !== null) {
+      try {
+        await this.connection.removeProgramAccountChangeListener(this.status1SubscriptionId);
+        this.logger.log('Removed status 1 listener');
+      } catch (error) {
+        this.logger.error('Error removing status 1 listener:', error instanceof Error ? error.message : 'Unknown error');
       }
     }
     
@@ -148,6 +167,22 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
     return this.pendingPools.has(poolId);
   }
 
+  /**
+   * Get message statistics for health monitoring
+   */
+  public getMessageStats() {
+    const now = Date.now();
+    const timeSinceLastMessage = now - this.lastMessageTime;
+    const messagesPerMinute = this.messageCount;
+    
+    return {
+      total_messages: this.messageCount,
+      messages_per_minute: messagesPerMinute,
+      time_since_last_message_ms: timeSinceLastMessage,
+      is_active: timeSinceLastMessage < 60000 // Active if last message was within 1 minute
+    };
+  }
+
   // ============================================================================
   // PRIVATE METHODS
   // ============================================================================
@@ -157,11 +192,39 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
     while (!this.socketService.isReady() && attempts < 10) {
       await new Promise(resolve => setTimeout(resolve, 1000));
       attempts++;
-      this.logger.log(`[UnifiedPoolMonitorService] Waiting for Socket.IO server... attempt ${attempts}/10`);
+      this.logger.log(`Waiting for Socket.IO server... attempt ${attempts}/10`);
     }
 
     if (!this.socketService.isReady()) {
       throw new Error('Socket.IO server failed to initialize within 10 seconds');
+    }
+  }
+
+  // Logs monitoring for health tracking (SILENT - no logging)
+  private async startLogsMonitoring(): Promise<void> {
+    try {
+      this.logsSubscriptionId = this.connection.onLogs(
+        RAYDIUM_PROGRAM_ID,
+        ({ logs, err, signature }) => {
+          if (err) return;
+
+          // Silently count messages for health monitoring
+          this.messageCount++;
+          this.lastMessageTime = Date.now();
+          
+          // Track message in gateway service for health monitoring
+          this.gatewayService.trackRaydiumMessage();
+          
+          // NO LOGGING - just count for health monitoring
+        },
+        'confirmed'
+      );
+
+      this.logger.log('✅ Logs monitoring active (silent health tracking)');
+      this.logger.log('📊 Tracking all Raydium network activity silently...');
+    } catch (error) {
+      this.logger.error('Failed to start logs monitoring:', error instanceof Error ? error.message : 'Unknown error');
+      throw error;
     }
   }
 
@@ -184,37 +247,10 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
         ]
       );
 
-      this.logger.log('[UnifiedPoolMonitorService] ✅ Status 1 monitoring active');
-      this.logger.log('[UnifiedPoolMonitorService] 🎯 Watching for new pool initializations...');
+      this.logger.log('✅ Status 1 monitoring active');
+      this.logger.log('🎯 Watching for new pool initializations...');
     } catch (error) {
-      this.logger.error('[UnifiedPoolMonitorService] Failed to start status 1 monitoring:', error instanceof Error ? error.message : 'Unknown error');
-      throw error;
-    }
-  }
-
-  private async startStatus6Monitoring(): Promise<void> {
-    try {
-      this.status6SubscriptionId = this.connection.onProgramAccountChange(
-        RAYDIUM_PROGRAM_ID,
-        async (updatedAccountInfo) => {
-          await this.handleStatus6Detection(updatedAccountInfo);
-        },
-        'confirmed',
-        [
-          { dataSize: LIQUIDITY_STATE_LAYOUT_V4.span },
-          { 
-            memcmp: { 
-              offset: LIQUIDITY_STATE_LAYOUT_V4.offsetOf('status'),
-              bytes: bs58.encode([6, 0, 0, 0, 0, 0, 0, 0]) // Status 6 in little-endian
-            }
-          }
-        ]
-      );
-
-      this.logger.log('[UnifiedPoolMonitorService] ✅ Status 6 monitoring active');
-      this.logger.log('[UnifiedPoolMonitorService] 🎯 Watching for status 6 transitions...');
-    } catch (error) {
-      this.logger.error('[UnifiedPoolMonitorService] Failed to start status 6 monitoring:', error instanceof Error ? error.message : 'Unknown error');
+      this.logger.error('Failed to start status 1 monitoring:', error instanceof Error ? error.message : 'Unknown error');
       throw error;
     }
   }
@@ -223,9 +259,14 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
     try {
       const poolId = updatedAccountInfo.accountId.toString();
       
-      // Skip if we're already monitoring this pool
+      // Check if we're already monitoring this pool
       if (this.pendingPools.has(poolId)) {
         return;
+      }
+
+      // Check if we've reached the maximum pending pools
+      if (this.pendingPools.size >= this.config.maxPendingPools) {
+        this.removeOldestPendingPool();
       }
 
       // Decode the pool state
@@ -239,27 +280,21 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
         return;
       }
 
-      // Filter out legacy pools (poolOpenTime: 0)
-      if (poolState.poolOpenTime === 0) {
-        this.logger.debug(`[UnifiedPoolMonitorService] Skipping legacy pool ${poolId} (poolOpenTime: 0)`);
+      // Check if pool is recent (within last hour)
+      const currentTime = Math.floor(Date.now() / 1000);
+      if (currentTime - poolState.poolOpenTime > this.config.status6FilterHours * 3600) {
+        this.logger.debug(`Pool ${poolId} too old, skipping`);
         return;
       }
 
-      this.logger.log(`[UnifiedPoolMonitorService] 🚀 NEW STATUS 1 POOL DETECTED: ${poolId}`);
-      this.logger.log(`[UnifiedPoolMonitorService] Base mint: ${poolState.baseMint}`);
-      this.logger.log(`[UnifiedPoolMonitorService] Quote mint: ${poolState.quoteMint}`);
+      this.logger.log(`🎯 STATUS 1 DETECTED: ${poolId}`);
+      this.logger.log(`Pool opens at: ${new Date(poolState.poolOpenTime * 1000)}`);
 
-      // Get token information
+      // Get token info
       const tokenInfo = await this.getTokenInfo(poolState.baseMint, poolState.quoteMint);
       if (!tokenInfo) {
-        this.logger.warn(`[UnifiedPoolMonitorService] Could not get token info for pool ${poolId}`);
+        this.logger.error(`Failed to get token info for pool ${poolId}`);
         return;
-      }
-
-      // Check if we have room for more pending pools
-      if (this.pendingPools.size >= this.config.maxPendingPools) {
-        this.logger.warn(`[UnifiedPoolMonitorService] Max pending pools reached (${this.config.maxPendingPools}), removing oldest`);
-        this.removeOldestPendingPool();
       }
 
       // Create pool state and add to pending
@@ -274,7 +309,10 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
       };
 
       this.pendingPools.set(poolId, newPoolState);
-      this.logger.log(`[UnifiedPoolMonitorService] ➕ Added to pending: ${poolId}`);
+      this.logger.log(`➕ Added to pending: ${poolId}`);
+
+      // NEW: Add individual listener for this pool to watch for Status 6
+      await this.addIndividualStatus6Listener(poolId);
 
       // Broadcast status 1 event
       this.broadcastEvent({
@@ -289,15 +327,14 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
       });
 
     } catch (error) {
-      this.logger.error(`[UnifiedPoolMonitorService] Error handling status 1 detection:`, error instanceof Error ? error.message : 'Unknown error');
+      this.logger.error(`Error handling status 1 detection:`, error instanceof Error ? error.message : 'Unknown error');
     }
   }
 
-  private async handleStatus6Detection(updatedAccountInfo: any): Promise<void> {
+  // NEW: Handle individual Status 6 detection for a specific pool
+  private async handleIndividualStatus6Detection(poolId: string, updatedAccountInfo: any): Promise<void> {
     try {
-      const poolId = updatedAccountInfo.accountId.toString();
-      
-      // Check if this is a pool we're monitoring
+      // Check if this is still a pool we're monitoring
       const pendingPool = this.pendingPools.get(poolId);
       if (!pendingPool) {
         // Not a pool we're tracking, skip
@@ -318,13 +355,13 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
       // Check if pool is actually open for trading
       const currentTime = Math.floor(Date.now() / 1000);
       if (currentTime < poolState.poolOpenTime) {
-        this.logger.debug(`[UnifiedPoolMonitorService] Pool ${poolId} status 6 but not yet open`);
+        this.logger.debug(`Pool ${poolId} status 6 but not yet open`);
         return;
       }
 
-      this.logger.log(`[UnifiedPoolMonitorService] 🎯 STATUS 6 TRANSITION DETECTED: ${poolId}`);
-      this.logger.log(`[UnifiedPoolMonitorService] Pool opens at: ${new Date(poolState.poolOpenTime * 1000)}`);
-      this.logger.log(`[UnifiedPoolMonitorService] ⏱️  Time from status 1 to status 6: ${Math.floor((Date.now() - (pendingPool.status_1_detected_at || pendingPool.detected_at)) / 1000)}s`);
+      this.logger.log(`🎯 STATUS 6 TRANSITION DETECTED: ${poolId}`);
+      this.logger.log(`Pool opens at: ${new Date(poolState.poolOpenTime * 1000)}`);
+      this.logger.log(`⏱️  Time from status 1 to status 6: ${Math.floor((Date.now() - (pendingPool.status_1_detected_at || pendingPool.detected_at)) / 1000)}s`);
 
       // Update pool state
       pendingPool.status = 6;
@@ -355,12 +392,15 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
         }
       });
 
+      // Remove individual listener for this pool
+      await this.removeIndividualStatus6Listener(poolId);
+
       // Remove from pending pools (mission accomplished!)
       this.pendingPools.delete(poolId);
-      this.logger.log(`[UnifiedPoolMonitorService] ✅ Removed from pending: ${poolId}`);
+      this.logger.log(`✅ Removed from pending: ${poolId}`);
 
     } catch (error) {
-      this.logger.error(`[UnifiedPoolMonitorService] Error handling status 6 detection:`, error instanceof Error ? error.message : 'Unknown error');
+      this.logger.error(`Error handling individual status 6 detection for pool ${poolId}:`, error instanceof Error ? error.message : 'Unknown error');
     }
   }
 
@@ -381,7 +421,7 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
 
       return { baseToken, quoteToken };
     } catch (error) {
-      this.logger.error('[UnifiedPoolMonitorService] Error getting token info:', error instanceof Error ? error.message : 'Unknown error');
+      this.logger.error('Error getting token info:', error instanceof Error ? error.message : 'Unknown error');
       return null;
     }
   }
@@ -395,7 +435,7 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
         data: event.data
       });
     } catch (error) {
-      this.logger.error(`[UnifiedPoolMonitorService] Error broadcasting event:`, error instanceof Error ? error.message : 'Unknown error');
+      this.logger.error(`Error broadcasting event:`, error instanceof Error ? error.message : 'Unknown error');
     }
   }
 
@@ -407,7 +447,7 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
     
     if (oldestPool) {
       this.pendingPools.delete(oldestPool[0]);
-      this.logger.log(`[UnifiedPoolMonitorService] 🗑️  Removed oldest pending pool: ${oldestPool[0]}`);
+      this.logger.log(`🗑️  Removed oldest pending pool: ${oldestPool[0]}`);
     }
   }
 
@@ -416,7 +456,7 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
       this.performCleanup();
     }, this.config.cleanupIntervalMs);
     
-    this.logger.log(`[UnifiedPoolMonitorService] 🧹 Cleanup task started (${this.config.cleanupIntervalMs}ms interval)`);
+    this.logger.log(`🧹 Cleanup task started (${this.config.cleanupIntervalMs}ms interval)`);
   }
 
   private startHealthCheckTask(): void {
@@ -424,7 +464,7 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
       this.performHealthCheck();
     }, this.config.healthCheckIntervalMs);
     
-    this.logger.log(`[UnifiedPoolMonitorService] 💚 Health check task started (${this.config.healthCheckIntervalMs}ms interval)`);
+    this.logger.log(`💚 Health check task started (${this.config.healthCheckIntervalMs}ms interval)`);
   }
 
   private performCleanup(): void {
@@ -435,28 +475,80 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
       // Clean up old pending pools (older than 1 hour)
       for (const [poolId, pool] of this.pendingPools.entries()) {
         if (now - pool.detected_at > ONE_HOUR) {
+          // Remove individual listener for this pool
+          this.removeIndividualStatus6Listener(poolId);
+          
+          // Remove from pending pools
           this.pendingPools.delete(poolId);
-          this.logger.log(`[UnifiedPoolMonitorService] 🗑️  Cleaned up old pending pool: ${poolId}`);
+          this.logger.log(`🗑️  Cleaned up old pending pool: ${poolId}`);
         }
       }
       
     } catch (error) {
-      this.logger.error('[UnifiedPoolMonitorService] Error during cleanup:', error instanceof Error ? error.message : 'Unknown error');
+      this.logger.error('Error during cleanup:', error instanceof Error ? error.message : 'Unknown error');
     }
   }
 
   private performHealthCheck(): void {
     try {
       const stats = this.getPoolStats();
-      this.logger.log(`[UnifiedPoolMonitorService] 💚 Health check - Pending: ${stats.pending}/${stats.max_pending}`);
+      const messageStats = this.getMessageStats();
+      
+      this.logger.log(`💚 Health check - Pending: ${stats.pending}/${stats.max_pending} | Messages: ${messageStats.messages_per_minute}/min | Active: ${messageStats.is_active ? '✅' : '❌'}`);
       
       // Check for potential issues
       if (stats.pending > this.config.maxPendingPools * 0.8) {
-        this.logger.warn(`[UnifiedPoolMonitorService] ⚠️  High pending pool count: ${stats.pending}/${this.config.maxPendingPools}`);
+        this.logger.warn(`⚠️  High pending pool count: ${stats.pending}/${this.config.maxPendingPools}`);
       }
       
+      if (!messageStats.is_active) {
+        this.logger.warn(`⚠️  No Raydium messages received in last minute`);
+      }
+      
+      // Reset message count for next minute
+      this.messageCount = 0;
+      
     } catch (error) {
-      this.logger.error('[UnifiedPoolMonitorService] Error during health check:', error instanceof Error ? error.message : 'Unknown error');
+      this.logger.error('Error during health check:', error instanceof Error ? error.message : 'Unknown error');
+    }
+  }
+
+  // NEW: Add individual listener for a specific pool to watch for Status 6
+  private async addIndividualStatus6Listener(poolId: string): Promise<void> {
+    try {
+      const poolPublicKey = new PublicKey(poolId);
+      
+      const subscriptionId = this.connection.onProgramAccountChange(
+        poolPublicKey,
+        async (updatedAccountInfo) => {
+          await this.handleIndividualStatus6Detection(poolId, updatedAccountInfo);
+        },
+        'confirmed'
+      );
+
+      // Store the subscription ID in the pool state
+      const pool = this.pendingPools.get(poolId);
+      if (pool) {
+        pool.status6SubscriptionId = subscriptionId;
+        this.pendingPools.set(poolId, pool);
+      }
+
+      this.logger.log(`✅ Added individual Status 6 listener for pool: ${poolId}`);
+    } catch (error) {
+      this.logger.error(`Failed to add individual Status 6 listener for pool ${poolId}:`, error instanceof Error ? error.message : 'Unknown error');
+    }
+  }
+
+  // NEW: Remove individual listener for a specific pool
+  private async removeIndividualStatus6Listener(poolId: string): Promise<void> {
+    try {
+      const pool = this.pendingPools.get(poolId);
+      if (pool && pool.status6SubscriptionId) {
+        await this.connection.removeProgramAccountChangeListener(pool.status6SubscriptionId);
+        this.logger.log(`✅ Removed individual Status 6 listener for pool: ${poolId}`);
+      }
+    } catch (error) {
+      this.logger.error(`Error removing individual Status 6 listener for pool ${poolId}:`, error instanceof Error ? error.message : 'Unknown error');
     }
   }
 } 
