@@ -65,16 +65,6 @@ async function bootstrap() {
     logger: fileLogger, // Use our custom file logger
   });
 
-  // Get the SocketService and set the Express app before app.init()
-  const socketService = app.get(SocketService);
-  socketService.setExpressApp(expressApp);
-
-  // Get the GatewayService and set the Express app for HTTP endpoints
-  const gatewayService = app.get(GatewayService);
-  if (gatewayService && typeof gatewayService.setExpressApp === 'function') {
-    gatewayService.setExpressApp(expressApp);
-  }
-
   // Configure logging with our file logger
   app.useLogger(fileLogger);
 
@@ -90,6 +80,39 @@ async function bootstrap() {
 
   // Initialize the application and wait for all modules to be ready
   await app.init();
+  
+  // Get the SocketService and set the Express app AFTER app.init()
+  const socketService = app.get(SocketService);
+  socketService.setExpressApp(expressApp);
+
+  // Get the GatewayService and set the Express app for HTTP endpoints
+  const gatewayService = app.get(GatewayService);
+  if (gatewayService && typeof gatewayService.setExpressApp === 'function') {
+    gatewayService.setExpressApp(expressApp);
+  }
+
+  // Wait for SocketService to be ready
+  logger.log('Waiting for SocketService to initialize...');
+  let attempts = 0;
+  const maxAttempts = 30;
+  
+  while (attempts < maxAttempts) {
+    if (socketService.isReady()) {
+      logger.log('✅ SocketService is ready');
+      break;
+    }
+    
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    attempts++;
+    
+    if (attempts % 5 === 0) {
+      logger.log(`⏳ Still waiting for SocketService... (${attempts}s)`);
+    }
+  }
+  
+  if (attempts >= maxAttempts) {
+    logger.error('❌ SocketService initialization timeout');
+  }
   
   logger.log('Application ready');
   fileLogger.log('NestJS application started with file logging enabled', 'Bootstrap');
@@ -109,8 +132,12 @@ async function bootstrap() {
     process.exit(0);
   });
 
-  // Keep the application running
-  await app.listen(0); // Listen on a random port since we're using our own HTTP server
+  // Keep the application running without starting the built-in HTTP server
+  // The SocketService handles its own HTTP server on port 5001
+  await new Promise(() => {
+    // Keep the process alive indefinitely
+    // The SocketService HTTP server is already running
+  });
 }
 
 bootstrap();

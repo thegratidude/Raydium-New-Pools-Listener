@@ -6,12 +6,14 @@ import { RaydiumModule } from './raydium/raydium.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { GatewayModule } from './gateway/gateway.module';
 import { MonitorModule } from './monitor/monitor.module';
+import { PositionManagerModule } from './position-manager/position-manager.module';
+import { LifeguardModule } from './lifeguard/lifeguard.module';
 
 const HTTP_URL = process.env.HTTP_URL || 'https://api.mainnet-beta.solana.com';
 const WSS_URL = process.env.WSS_URL || 'wss://api.mainnet-beta.solana.com';
 
 @Module({
-  imports: [RaydiumModule, PrismaModule, GatewayModule, MonitorModule],
+  imports: [RaydiumModule, PrismaModule, GatewayModule, MonitorModule, PositionManagerModule, LifeguardModule],
   controllers: [AppController],
   providers: [
     AppService,

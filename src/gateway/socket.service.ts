@@ -115,15 +115,19 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
       this.logger.log(`Starting server on port ${this.PORT}...`);
       await new Promise<void>((resolve, reject) => {
         this.httpServer.listen(this.PORT, () => {
-          this.logger.log(`Socket.IO server running on port ${this.PORT}`);
+          this.logger.log(`✅ Socket.IO server running on port ${this.PORT}`);
           this.logger.log(`Server address: http://localhost:${this.PORT}`);
           this.isInitialized = true;
-          this.startHealthChecks();
           this.isServerReady = true;
+          this.startHealthChecks();
           resolve();
         });
 
         this.httpServer.on('error', (error: NodeJS.ErrnoException) => {
+          this.logger.error(`❌ HTTP server error: ${error.message}`);
+          this.logger.error(`Error code: ${error.code}`);
+          this.logger.error(`Error stack: ${error.stack}`);
+          
           if (error.code === 'EADDRINUSE') {
             this.logger.error(`Port ${this.PORT} is already in use. Attempting to recover...`);
             try {
@@ -141,10 +145,10 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
         });
       });
 
-      this.logger.log('SocketService initialization completed successfully');
+      this.logger.log('✅ SocketService initialization completed successfully');
     } catch (error) {
-      this.logger.error(`SocketService initialization failed: ${error.message}`);
-      this.logger.error(error.stack);
+      this.logger.error(`❌ SocketService initialization failed: ${error.message}`);
+      this.logger.error(`Error stack: ${error.stack}`);
       throw error; // Re-throw to let NestJS handle the error
     }
   }

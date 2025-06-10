@@ -5,6 +5,7 @@ import { GatewayService } from '../gateway/gateway.service';
 import { TokenInfo } from '../types/token';
 import { LIQUIDITY_STATE_LAYOUT_V4, decodeRaydiumPoolState } from './raydium-layout';
 import bs58 from 'bs58';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 
 const RAYDIUM_PROGRAM_ID = new PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8');
 
@@ -59,7 +60,8 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
   constructor(
     private readonly connection: Connection,
     private readonly socketService: SocketService,
-    private readonly gatewayService: GatewayService
+    private readonly gatewayService: GatewayService,
+    private readonly eventEmitter: EventEmitter2
   ) {
     this.logger.log('Initializing unified pool monitor...');
   }
@@ -333,74 +335,36 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
         pool_id: poolId,
         timestamp: Date.now(),
         data: {
-          // Basic token info
-          token_a: newPoolState.token_a,
-          token_b: newPoolState.token_b,
-          pool_open_time: poolState.poolOpenTime,
-          
-          // Vault addresses for direct trading
+          // Basic pool info
+          pool_id: poolId,
+          token_a_mint: poolState.baseMint,
+          token_b_mint: poolState.quoteMint,
           base_vault: poolState.baseVault,
           quote_vault: poolState.quoteVault,
-          
-          // Market information
           lp_mint: poolState.lpMint,
           market_id: poolState.serumMarket,
           amm_open_orders: poolState.ammOpenOrders,
-          serum_program_id: poolState.serumProgramId,
-          amm_target_orders: poolState.ammTargetOrders,
-          pool_withdraw_queue: poolState.poolWithdrawQueue,
-          pool_temp_lp_token_account: poolState.poolTempLpTokenAccount,
-          amm_owner: poolState.ammOwner,
-          pnl_owner: poolState.pnlOwner,
           
-          // Fee structure (extracted from pool state)
-          trade_fee_numerator: poolState.tradeFeeNumerator,
-          trade_fee_denominator: poolState.tradeFeeDenominator,
-          swap_fee_numerator: poolState.swapFeeNumerator,
-          swap_fee_denominator: poolState.swapFeeDenominator,
-          pnl_numerator: poolState.pnlNumerator,
-          pnl_denominator: poolState.pnlDenominator,
+          // Calculate fees as percentages
+          trade_fee: (poolState.tradeFeeNumerator / poolState.tradeFeeDenominator) * 100,
+          swap_fee: (poolState.swapFeeNumerator / poolState.swapFeeDenominator) * 100,
           
           // Trading parameters
           min_size: poolState.minSize,
-          vol_max_cut_ratio: poolState.volMaxCutRatio,
-          amount_wave_ratio: poolState.amountWaveRatio,
-          coin_lot_size: poolState.coinLotSize,
-          pc_lot_size: poolState.pcLotSize,
-          max_price_multiplier: poolState.maxPriceMultiplier,
-          min_price_multiplier: poolState.minPriceMultiplier,
-          
-          // Pool configuration
-          base_decimals: poolState.baseDecimal,
-          quote_decimals: poolState.quoteDecimal,
-          nonce: poolState.nonce,
-          order_num: poolState.orderNum,
-          depth: poolState.depth,
-          state: poolState.state,
-          reset_flag: poolState.resetFlag,
-          system_decimals_value: poolState.systemDecimalsValue,
-          min_separate_numerator: poolState.minSeparateNumerator,
-          min_separate_denominator: poolState.minSeparateDenominator,
-          
-          // PnL and swap state
-          need_take_pnl_coin: poolState.needTakePnlCoin,
-          need_take_pnl_pc: poolState.needTakePnlPc,
-          total_pnl_pc: poolState.totalPnlPc,
-          total_pnl_coin: poolState.totalPnlCoin,
-          punish_pc_amount: poolState.punishPcAmount,
-          punish_coin_amount: poolState.punishCoinAmount,
-          orderbook_to_init_time: poolState.orderbookToInitTime,
-          
-          // Swap amounts (convert BigNumber to string for JSON serialization)
-          swap_coin_in_amount: poolState.swapCoinInAmount?.toString() || '0',
-          swap_pc_out_amount: poolState.swapPcOutAmount?.toString() || '0',
-          swap_coin_2_pc_fee: poolState.swapCoin2PcFee,
-          swap_pc_in_amount: poolState.swapPcInAmount?.toString() || '0',
-          swap_coin_out_amount: poolState.swapCoinOutAmount?.toString() || '0',
-          swap_pc_2_coin_fee: poolState.swapPc2CoinFee,
-          
-          // Detection metadata
+          price_range_min: poolState.minPriceMultiplier,
+          price_range_max: poolState.maxPriceMultiplier,
+          decimals_a: poolState.baseDecimal,
+          decimals_b: poolState.quoteDecimal,
+          order_book_depth: poolState.depth,
+          pool_open_time: poolState.poolOpenTime,
           detected_at: Date.now(),
+          analysis_status: 'pending',
+          
+          // Additional token info for compatibility
+          token_a: newPoolState.token_a,
+          token_b: newPoolState.token_b,
+          
+          // Additional metadata
           pool_age_seconds: Math.floor(Date.now() / 1000) - poolState.poolOpenTime
         }
       });
@@ -446,15 +410,85 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
       pendingPool.status = 6;
       pendingPool.pool_open_time = poolState.poolOpenTime;
 
-      // Broadcast status 6 event to port 5001
+      // Calculate fees as percentages
+      const tradeFeePercent = (poolState.tradeFeeNumerator / poolState.tradeFeeDenominator) * 100;
+      const swapFeePercent = (poolState.swapFeeNumerator / poolState.swapFeeDenominator) * 100;
+
+      // Create comprehensive pool data for position manager
+      const poolData = {
+        pool_id: poolId,
+        token_a_mint: poolState.baseMint,
+        token_b_mint: poolState.quoteMint,
+        base_vault: poolState.baseVault,
+        quote_vault: poolState.quoteVault,
+        lp_mint: poolState.lpMint,
+        market_id: poolState.serumMarket,
+        amm_open_orders: poolState.ammOpenOrders,
+        trade_fee: tradeFeePercent,
+        swap_fee: swapFeePercent,
+        min_size: poolState.minSize,
+        price_range_min: poolState.minPriceMultiplier,
+        price_range_max: poolState.maxPriceMultiplier,
+        decimals_a: poolState.baseDecimal,
+        decimals_b: poolState.quoteDecimal,
+        order_book_depth: poolState.depth,
+        pool_open_time: poolState.poolOpenTime,
+        detected_at: Date.now(),
+        analysis_status: 'pending' as const
+      };
+
+      // Debug: Log the actual pool data structure
+      this.logger.log(`🔍 DEBUG: Pool data structure for ${poolId}:`, {
+        pool_id: poolData.pool_id,
+        token_a_mint: poolData.token_a_mint,
+        token_b_mint: poolData.token_b_mint,
+        base_vault: poolData.base_vault,
+        quote_vault: poolData.quote_vault,
+        lp_mint: poolData.lp_mint,
+        market_id: poolData.market_id,
+        amm_open_orders: poolData.amm_open_orders,
+        trade_fee: poolData.trade_fee,
+        swap_fee: poolData.swap_fee,
+        min_size: poolData.min_size,
+        price_range_min: poolData.price_range_min,
+        price_range_max: poolData.price_range_max,
+        decimals_a: poolData.decimals_a,
+        decimals_b: poolData.decimals_b,
+        order_book_depth: poolData.order_book_depth,
+        pool_open_time: poolData.pool_open_time
+      });
+
+      // Debug: Log the raw pool state
+      this.logger.log(`🔍 DEBUG: Raw pool state for ${poolId}:`, {
+        baseMint: poolState.baseMint,
+        quoteMint: poolState.quoteMint,
+        baseVault: poolState.baseVault,
+        quoteVault: poolState.quoteVault,
+        lpMint: poolState.lpMint,
+        serumMarket: poolState.serumMarket,
+        ammOpenOrders: poolState.ammOpenOrders,
+        tradeFeeNumerator: poolState.tradeFeeNumerator,
+        tradeFeeDenominator: poolState.tradeFeeDenominator,
+        swapFeeNumerator: poolState.swapFeeNumerator,
+        swapFeeDenominator: poolState.swapFeeDenominator,
+        minSize: poolState.minSize,
+        minPriceMultiplier: poolState.minPriceMultiplier,
+        maxPriceMultiplier: poolState.maxPriceMultiplier,
+        baseDecimal: poolState.baseDecimal,
+        quoteDecimal: poolState.quoteDecimal,
+        depth: poolState.depth,
+        poolOpenTime: poolState.poolOpenTime
+      });
+
+      // Broadcast status 6 event to port 5001 with full pool data
       this.broadcastEvent({
         type: 'pool_status_6',
         pool_id: poolId,
         timestamp: Date.now(),
         data: {
+          ...poolData,
           token_a: pendingPool.token_a,
           token_b: pendingPool.token_b,
-          pool_open_time: poolState.poolOpenTime,
           time_to_status_6_ms: Date.now() - (pendingPool.status_1_detected_at || pendingPool.detected_at)
         }
       });
@@ -465,9 +499,9 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
         pool_id: poolId,
         timestamp: Date.now(),
         data: {
+          ...poolData,
           base_token: pendingPool.token_a.symbol,
-          quote_token: pendingPool.token_b.symbol,
-          pool_open_time: poolState.poolOpenTime
+          quote_token: pendingPool.token_b.symbol
         }
       });
 
@@ -511,6 +545,13 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
       
       // Use the more flexible broadcast method for different event types
       this.socketService.broadcast(event.type, {
+        pool_id: event.pool_id,
+        timestamp: event.timestamp,
+        data: event.data
+      });
+      
+      // Also emit event for position manager to listen to
+      this.eventEmitter.emit(event.type, {
         pool_id: event.pool_id,
         timestamp: event.timestamp,
         data: event.data
