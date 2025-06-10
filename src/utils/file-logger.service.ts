@@ -185,12 +185,8 @@ export class FileLoggerService implements LoggerService {
     // Assign colors to different services for visual distinction
     const contextColors: { [key: string]: string } = {
       'NestFactory': colors.cyan,
-      'SocketService': colors.magenta,
-      'GatewayService': colors.blue,
-      'HealthMonitorService': colors.green,
-      'PoolMonitorService': colors.yellow,
-      'PendingPoolManager': colors.cyan,
-      'PoolMonitorManager': colors.magenta,
+      'SocketService': colors.cyan,
+      'GatewayService': colors.magenta,
       'RaydiumListener': colors.green,
       'SimpleRaydiumListener': colors.orange,
       'Bootstrap': colors.bright + colors.white,
@@ -201,7 +197,9 @@ export class FileLoggerService implements LoggerService {
       'Application': colors.gray,
       'WebSocket': colors.cyan,
       'PoolMonitor': colors.yellow,
-      'RaydiumLayout': colors.magenta
+      'RaydiumLayout': colors.magenta,
+      'UnifiedPoolMonitorService': colors.blue,
+      'FileLoggerService': colors.green,
     };
 
     return contextColors[context] || colors.white;
