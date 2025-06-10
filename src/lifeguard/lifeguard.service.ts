@@ -403,6 +403,13 @@ export class LifeguardService implements OnModuleInit {
         // TVL change percentage
         const tvlChangePercent = ((tvlSOL - baselineTVLSOL) / baselineTVLSOL) * 100;
 
+        // 🚨 NEW: Check if pool is dead (TVL below -90%)
+        if (tvlChangePercent <= -90) {
+          this.logger.warn(`💀 Pool ${poolId} is DEAD (TVL: ${tvlChangePercent.toFixed(2)}%). Stopping monitoring.`);
+          this.stopMonitoring(poolId, 'dead');
+          return; // Exit early, no more updates
+        }
+
         // Check if there's a significant change since last update (0.1% threshold)
         const priceChangeSinceLast = Math.abs((currentPrice - monitor.lastPrice) / monitor.lastPrice) * 100;
         const tvlChangeSinceLast = Math.abs((tvlSOL - monitor.lastTVL) / monitor.lastTVL) * 100;
@@ -523,7 +530,7 @@ export class LifeguardService implements OnModuleInit {
       }
 
       const reserveRatio = baseBalance / quoteBalance;
-      const tvl = quoteBalance * 2; // Simple TVL estimation
+      const tvl = quoteBalance; // TVL is just the quote reserve (SOL amount)
 
       return {
         baseReserve: baseBalance,
@@ -569,7 +576,7 @@ export class LifeguardService implements OnModuleInit {
     }
   }
 
-  private stopMonitoring(poolId: string) {
+  private stopMonitoring(poolId: string, reason: 'timeout' | 'dead' | 'manual' = 'timeout') {
     const monitor = this.monitoredPools.get(poolId);
     if (!monitor) return;
 
@@ -584,7 +591,17 @@ export class LifeguardService implements OnModuleInit {
       this.logger.error(`Error updating pool status for ${poolId}:`, error);
     });
 
-    this.logger.log(`⏰ Stopped monitoring pool ${poolId} (15min monitoring window completed)`);
+    // Different logging based on reason
+    switch (reason) {
+      case 'dead':
+        this.logger.log(`💀 Stopped monitoring dead pool ${poolId} (TVL dropped below -90%)`);
+        break;
+      case 'manual':
+        this.logger.log(`🛑 Manually stopped monitoring pool ${poolId}`);
+        break;
+      default:
+        this.logger.log(`⏰ Stopped monitoring pool ${poolId} (15min monitoring window completed)`);
+    }
   }
 
   // Public methods for external access
@@ -597,7 +614,7 @@ export class LifeguardService implements OnModuleInit {
   }
 
   async forceStopMonitoring(poolId: string) {
-    this.stopMonitoring(poolId);
+    this.stopMonitoring(poolId, 'manual');
   }
 
   // New monitoring statistics and health methods
