@@ -1,6 +1,5 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
-import { startListener } from './scripts/new-raydium-pools/listener';
 import { Connection, PublicKey } from '@solana/web3.js';
 import * as dotenv from 'dotenv';
 import { execSync } from 'child_process';
@@ -94,9 +93,6 @@ async function bootstrap() {
   
   logger.log('Application ready');
   fileLogger.log('NestJS application started with file logging enabled', 'Bootstrap');
-
-  // Start the pool listener with the app instance
-  await startListener(app, rpcConnection, RAYDIUM, INSTRUCTION_NAMES);
 
   // Handle graceful shutdown
   process.on('SIGINT', async () => {

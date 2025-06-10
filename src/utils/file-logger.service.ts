@@ -188,7 +188,6 @@ export class FileLoggerService implements LoggerService {
       'SocketService': colors.cyan,
       'GatewayService': colors.magenta,
       'RaydiumListener': colors.green,
-      'SimpleRaydiumListener': colors.orange,
       'Bootstrap': colors.bright + colors.white,
       'InstanceLoader': colors.gray,
       'RoutesResolver': colors.gray,
