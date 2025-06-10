@@ -441,14 +441,18 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
 
   private broadcastEvent(event: PoolEvent): void {
     try {
+      this.logger.log(`📡 Broadcasting ${event.type} event for pool: ${event.pool_id}`);
+      
       // Use the more flexible broadcast method for different event types
       this.socketService.broadcast(event.type, {
         pool_id: event.pool_id,
         timestamp: event.timestamp,
         data: event.data
       });
+      
+      this.logger.log(`✅ Successfully broadcasted ${event.type} event for pool: ${event.pool_id}`);
     } catch (error) {
-      this.logger.error(`Error broadcasting event:`, error instanceof Error ? error.message : 'Unknown error');
+      this.logger.error(`❌ Error broadcasting ${event.type} event for pool ${event.pool_id}:`, error instanceof Error ? error.message : 'Unknown error');
     }
   }
 
