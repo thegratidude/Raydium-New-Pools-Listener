@@ -83,6 +83,7 @@ export function decodeRaydiumPoolState(data: Buffer) {
     }
 
     return {
+      // Basic pool info
       baseMint: new PublicKey(decoded.coinMintAddress).toString(),
       quoteMint: new PublicKey(decoded.pcMintAddress).toString(),
       baseVault: new PublicKey(decoded.poolCoinTokenAccount).toString(),
@@ -91,6 +92,61 @@ export function decodeRaydiumPoolState(data: Buffer) {
       quoteDecimal: Number(decoded.pcDecimals),
       status: Number(decoded.status),
       poolOpenTime: Number(decoded.poolOpenTime),
+      
+      // Market information
+      lpMint: new PublicKey(decoded.lpMintAddress).toString(),
+      ammOpenOrders: new PublicKey(decoded.ammOpenOrders).toString(),
+      serumMarket: new PublicKey(decoded.serumMarket).toString(),
+      serumProgramId: new PublicKey(decoded.serumProgramId).toString(),
+      ammTargetOrders: new PublicKey(decoded.ammTargetOrders).toString(),
+      poolWithdrawQueue: new PublicKey(decoded.poolWithdrawQueue).toString(),
+      poolTempLpTokenAccount: new PublicKey(decoded.poolTempLpTokenAccount).toString(),
+      ammOwner: new PublicKey(decoded.ammOwner).toString(),
+      pnlOwner: new PublicKey(decoded.pnlOwner).toString(),
+      
+      // Fee structure
+      tradeFeeNumerator: Number(decoded.tradeFeeNumerator),
+      tradeFeeDenominator: Number(decoded.tradeFeeDenominator),
+      swapFeeNumerator: Number(decoded.swapFeeNumerator),
+      swapFeeDenominator: Number(decoded.swapFeeDenominator),
+      pnlNumerator: Number(decoded.pnlNumerator),
+      pnlDenominator: Number(decoded.pnlDenominator),
+      
+      // Trading parameters
+      minSize: Number(decoded.minSize),
+      volMaxCutRatio: Number(decoded.volMaxCutRatio),
+      amountWaveRatio: Number(decoded.amountWaveRatio),
+      coinLotSize: Number(decoded.coinLotSize),
+      pcLotSize: Number(decoded.pcLotSize),
+      minPriceMultiplier: Number(decoded.minPriceMultiplier),
+      maxPriceMultiplier: Number(decoded.maxPriceMultiplier),
+      
+      // Pool configuration
+      nonce: Number(decoded.nonce),
+      orderNum: Number(decoded.orderNum),
+      depth: Number(decoded.depth),
+      state: Number(decoded.state),
+      resetFlag: Number(decoded.resetFlag),
+      systemDecimalsValue: Number(decoded.systemDecimalsValue),
+      minSeparateNumerator: Number(decoded.minSeparateNumerator),
+      minSeparateDenominator: Number(decoded.minSeparateDenominator),
+      
+      // PnL and swap state
+      needTakePnlCoin: Number(decoded.needTakePnlCoin),
+      needTakePnlPc: Number(decoded.needTakePnlPc),
+      totalPnlPc: Number(decoded.totalPnlPc),
+      totalPnlCoin: Number(decoded.totalPnlCoin),
+      punishPcAmount: Number(decoded.punishPcAmount),
+      punishCoinAmount: Number(decoded.punishCoinAmount),
+      orderbookToInitTime: Number(decoded.orderbookToInitTime),
+      
+      // Swap amounts (u128 - stored as big numbers)
+      swapCoinInAmount: decoded.swapCoinInAmount,
+      swapPcOutAmount: decoded.swapPcOutAmount,
+      swapCoin2PcFee: Number(decoded.swapCoin2PcFee),
+      swapPcInAmount: decoded.swapPcInAmount,
+      swapCoinOutAmount: decoded.swapCoinOutAmount,
+      swapPc2CoinFee: Number(decoded.swapPc2CoinFee)
     };
   } catch (error) {
     fileLogger.error(`Failed to decode pool state: ${error instanceof Error ? error.message : 'Unknown error'}`, undefined, 'RaydiumLayout');

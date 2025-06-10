@@ -333,9 +333,75 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
         pool_id: poolId,
         timestamp: Date.now(),
         data: {
+          // Basic token info
           token_a: newPoolState.token_a,
           token_b: newPoolState.token_b,
-          pool_open_time: poolState.poolOpenTime
+          pool_open_time: poolState.poolOpenTime,
+          
+          // Vault addresses for direct trading
+          base_vault: poolState.baseVault,
+          quote_vault: poolState.quoteVault,
+          
+          // Market information
+          lp_mint: poolState.lpMint,
+          market_id: poolState.serumMarket,
+          amm_open_orders: poolState.ammOpenOrders,
+          serum_program_id: poolState.serumProgramId,
+          amm_target_orders: poolState.ammTargetOrders,
+          pool_withdraw_queue: poolState.poolWithdrawQueue,
+          pool_temp_lp_token_account: poolState.poolTempLpTokenAccount,
+          amm_owner: poolState.ammOwner,
+          pnl_owner: poolState.pnlOwner,
+          
+          // Fee structure (extracted from pool state)
+          trade_fee_numerator: poolState.tradeFeeNumerator,
+          trade_fee_denominator: poolState.tradeFeeDenominator,
+          swap_fee_numerator: poolState.swapFeeNumerator,
+          swap_fee_denominator: poolState.swapFeeDenominator,
+          pnl_numerator: poolState.pnlNumerator,
+          pnl_denominator: poolState.pnlDenominator,
+          
+          // Trading parameters
+          min_size: poolState.minSize,
+          vol_max_cut_ratio: poolState.volMaxCutRatio,
+          amount_wave_ratio: poolState.amountWaveRatio,
+          coin_lot_size: poolState.coinLotSize,
+          pc_lot_size: poolState.pcLotSize,
+          max_price_multiplier: poolState.maxPriceMultiplier,
+          min_price_multiplier: poolState.minPriceMultiplier,
+          
+          // Pool configuration
+          base_decimals: poolState.baseDecimal,
+          quote_decimals: poolState.quoteDecimal,
+          nonce: poolState.nonce,
+          order_num: poolState.orderNum,
+          depth: poolState.depth,
+          state: poolState.state,
+          reset_flag: poolState.resetFlag,
+          system_decimals_value: poolState.systemDecimalsValue,
+          min_separate_numerator: poolState.minSeparateNumerator,
+          min_separate_denominator: poolState.minSeparateDenominator,
+          
+          // PnL and swap state
+          need_take_pnl_coin: poolState.needTakePnlCoin,
+          need_take_pnl_pc: poolState.needTakePnlPc,
+          total_pnl_pc: poolState.totalPnlPc,
+          total_pnl_coin: poolState.totalPnlCoin,
+          punish_pc_amount: poolState.punishPcAmount,
+          punish_coin_amount: poolState.punishCoinAmount,
+          orderbook_to_init_time: poolState.orderbookToInitTime,
+          
+          // Swap amounts (convert BigNumber to string for JSON serialization)
+          swap_coin_in_amount: poolState.swapCoinInAmount?.toString() || '0',
+          swap_pc_out_amount: poolState.swapPcOutAmount?.toString() || '0',
+          swap_coin_2_pc_fee: poolState.swapCoin2PcFee,
+          swap_pc_in_amount: poolState.swapPcInAmount?.toString() || '0',
+          swap_coin_out_amount: poolState.swapCoinOutAmount?.toString() || '0',
+          swap_pc_2_coin_fee: poolState.swapPc2CoinFee,
+          
+          // Detection metadata
+          detected_at: Date.now(),
+          pool_age_seconds: Math.floor(Date.now() / 1000) - poolState.poolOpenTime
         }
       });
 

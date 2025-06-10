@@ -123,7 +123,7 @@ async def connect():
     print(f"{Fore.GREEN}✅ Connected to Socket.IO server at {SERVER_URL}{Style.RESET_ALL}")
     print(f"{Fore.GREEN}✅ Client ID: {sio.sid}{Style.RESET_ALL}")
     print(f"{Fore.GREEN}✅ Transport: {sio.transport()}{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}🎧 Listening for events: health, new_pool, pool_update, pool_ready{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}🎧 Listening for events: pool_status_6, pool_ready, health{Style.RESET_ALL}")
     print(f"{Fore.CYAN}⏰ Health updates will be shown once per minute...{Style.RESET_ALL}")
     print(f"{Fore.YELLOW}💡 Press Ctrl+C to stop the listener{Style.RESET_ALL}")
 
@@ -136,74 +136,128 @@ async def disconnect():
     log_message("DISCONNECT", {"status": "disconnected", "server": SERVER_URL})
     print(f"{Fore.YELLOW}⚠️  Disconnected from server{Style.RESET_ALL}")
 
-@sio.on('new_pool')
-async def on_new_pool(data):
-    """Handle new pool events"""
+@sio.on('pool_status_6')
+async def on_pool_status_6(data):
+    """Handle pool status 6 events (NEW Status 6 pools detected)"""
     if not running:
         return
         
     global NEW_POOL_COUNT
     NEW_POOL_COUNT += 1
     
-    # Log the raw message with more detail
-    log_message("NEW_POOL", {
-        **data,
+    # Safely prepare data for logging by converting any problematic fields
+    safe_data = {}
+    for key, value in data.items():
+        if isinstance(value, bytes):
+            safe_data[key] = value.hex() if len(value) <= 32 else f"{value[:16].hex()}..."
+        elif isinstance(value, dict):
+            safe_data[key] = {}
+            for k, v in value.items():
+                if isinstance(v, bytes):
+                    safe_data[key][k] = v.hex() if len(v) <= 32 else f"{v[:16].hex()}..."
+                else:
+                    safe_data[key][k] = v
+        else:
+            safe_data[key] = value
+    
+    # Log the safe message
+    log_message("POOL_STATUS_6", {
+        **safe_data,
         "client_id": sio.sid,
         "received_at": datetime.now().isoformat()
     })
     
     try:
-        timestamp = datetime.fromisoformat(data.get('timestamp', '').replace('Z', '+00:00'))
+        timestamp = datetime.fromtimestamp(data.get('timestamp', 0) / 1000)
         formatted_time = timestamp.strftime('%Y-%m-%d %H:%M:%S')
         
-        print(f"\n{Fore.CYAN}[{formatted_time}] New Pool Detected:{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}Pool ID: {data.get('poolId', 'N/A')}{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}Type: {data.get('type', 'N/A')}{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}Client ID: {sio.sid}{Style.RESET_ALL}")
+        print(f"\n{Fore.GREEN}[{formatted_time}] 🚀 NEW STATUS 6 POOL DETECTED:{Style.RESET_ALL}")
+        print(f"{Fore.GREEN}════════════════════════════════════════════════════════════════════════════════{Style.RESET_ALL}")
+        print(f"{Fore.GREEN}Pool ID: {data.get('pool_id', 'N/A')}{Style.RESET_ALL}")
+        
+        # Token information
+        data_obj = data.get('data', {})
+        token_a = data_obj.get('token_a', {})
+        token_b = data_obj.get('token_b', {})
+        print(f"{Fore.GREEN}Token A: {token_a.get('symbol', 'N/A')} ({token_a.get('mint', 'N/A')[:8]}...){Style.RESET_ALL}")
+        print(f"{Fore.GREEN}Token B: {token_b.get('symbol', 'N/A')} ({token_b.get('mint', 'N/A')[:8]}...){Style.RESET_ALL}")
+        
+        # Pool timing
+        pool_open_time = data_obj.get('pool_open_time', 0)
+        if pool_open_time > 0:
+            pool_open_date = datetime.fromtimestamp(pool_open_time)
+            print(f"{Fore.GREEN}Pool Opens: {pool_open_date.strftime('%Y-%m-%d %H:%M:%S')}{Style.RESET_ALL}")
+            
+            # Calculate pool age
+            current_time = datetime.now()
+            pool_age = (current_time - pool_open_date).total_seconds()
+            print(f"{Fore.GREEN}Pool Age: {pool_age:.1f}s{Style.RESET_ALL}")
+        
+        # Vault addresses for trading
+        print(f"{Fore.CYAN}Base Vault: {data_obj.get('base_vault', 'N/A')[:8]}...{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}Quote Vault: {data_obj.get('quote_vault', 'N/A')[:8]}...{Style.RESET_ALL}")
+        
+        # Market information
+        print(f"{Fore.CYAN}LP Mint: {data_obj.get('lp_mint', 'N/A')[:8]}...{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}Market ID: {data_obj.get('market_id', 'N/A')[:8]}...{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}AMM Open Orders: {data_obj.get('amm_open_orders', 'N/A')[:8]}...{Style.RESET_ALL}")
+        
+        # Fee structure
+        trade_fee_num = data_obj.get('trade_fee_numerator', 0)
+        trade_fee_den = data_obj.get('trade_fee_denominator', 10000)
+        swap_fee_num = data_obj.get('swap_fee_numerator', 0)
+        swap_fee_den = data_obj.get('swap_fee_denominator', 10000)
+        
+        trade_fee_pct = (trade_fee_num / trade_fee_den * 100) if trade_fee_den > 0 else 0
+        swap_fee_pct = (swap_fee_num / swap_fee_den * 100) if swap_fee_den > 0 else 0
+        
+        print(f"{Fore.YELLOW}Trade Fee: {trade_fee_pct:.3f}% ({trade_fee_num}/{trade_fee_den}){Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}Swap Fee: {swap_fee_pct:.3f}% ({swap_fee_num}/{swap_fee_den}){Style.RESET_ALL}")
+        
+        # Trading parameters
+        min_size = data_obj.get('min_size', 0)
+        max_price_mult = data_obj.get('max_price_multiplier', 0)
+        min_price_mult = data_obj.get('min_price_multiplier', 0)
+        
+        print(f"{Fore.YELLOW}Min Size: {min_size}{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}Price Range: {min_price_mult:.2f}x - {max_price_mult:.2f}x{Style.RESET_ALL}")
+        
+        # Pool configuration
+        base_decimals = data_obj.get('base_decimals', 9)
+        quote_decimals = data_obj.get('quote_decimals', 6)
+        depth = data_obj.get('depth', 0)
+        
+        print(f"{Fore.YELLOW}Decimals: {base_decimals}/{quote_decimals}{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}Order Book Depth: {depth}{Style.RESET_ALL}")
+        
+        # Detection metadata
+        detected_at = data_obj.get('detected_at', 0)
+        pool_age_seconds = data_obj.get('pool_age_seconds', 0)
+        
+        print(f"{Fore.MAGENTA}Detected At: {datetime.fromtimestamp(detected_at/1000).strftime('%H:%M:%S.%f')[:-3]}{Style.RESET_ALL}")
+        print(f"{Fore.MAGENTA}Detection Delay: {pool_age_seconds}s{Style.RESET_ALL}")
+        
+        print(f"{Fore.GREEN}════════════════════════════════════════════════════════════════════════════════{Style.RESET_ALL}")
         
         # Send acknowledgment back to server
-        await sio.emit('pool_received', {
-            'poolId': data.get('poolId'),
+        await sio.emit('pool_status_6_received', {
+            'pool_id': data.get('pool_id'),
             'received_at': datetime.now().isoformat(),
             'client_id': sio.sid
         })
         
     except Exception as e:
-        print(f"{Fore.RED}Error processing new pool message: {str(e)}{Style.RESET_ALL}")
+        print(f"{Fore.RED}Error processing pool_status_6 message: {str(e)}{Style.RESET_ALL}")
         log_message("ERROR", {
-            "type": "new_pool_processing_error",
+            "type": "pool_status_6_processing_error",
             "error": str(e),
-            "data": data,
+            "data": safe_data,
             "client_id": sio.sid
         })
 
-@sio.on('pool_update')
-async def on_pool_update(data):
-    """Handle pool update events"""
-    if not running:
-        return
-        
-    log_message("POOL_UPDATE", {
-        **data,
-        "client_id": sio.sid,
-        "received_at": datetime.now().isoformat()
-    })
-    
-    try:
-        timestamp = datetime.fromisoformat(data.get('timestamp', '').replace('Z', '+00:00'))
-        formatted_time = timestamp.strftime('%Y-%m-%d %H:%M:%S')
-        
-        print(f"\n{Fore.YELLOW}[{formatted_time}] Pool Update:{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}Pool ID: {data.get('pool_id', 'N/A')}{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}Current Liquidity: {data.get('current_liquidity', 'N/A')}{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}Price Change: {data.get('price_change', 'N/A')}{Style.RESET_ALL}")
-        
-    except Exception as e:
-        print(f"{Fore.RED}Error processing pool update message: {str(e)}{Style.RESET_ALL}")
-
 @sio.on('pool_ready')
 async def on_pool_ready(data):
-    """Handle pool ready events"""
+    """Handle pool ready events (pools ready for trading)"""
     if not running:
         return
         
@@ -214,37 +268,25 @@ async def on_pool_ready(data):
     })
     
     try:
-        timestamp = datetime.fromisoformat(data.get('timestamp', '').replace('Z', '+00:00'))
+        timestamp = datetime.fromtimestamp(data.get('timestamp', 0) / 1000)
         formatted_time = timestamp.strftime('%Y-%m-%d %H:%M:%S')
         
-        print(f"\n{Fore.GREEN}[{formatted_time}] 🎯 STATUS 6 POOL READY:{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}════════════════════════════════════════════════════════════════════════════════{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}Pool ID: {data.get('pool_id', 'N/A')}{Style.RESET_ALL}")
+        print(f"\n{Fore.CYAN}[{formatted_time}] 🎯 POOL READY FOR TRADING:{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}════════════════════════════════════════════════════════════════════════════════{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}Pool ID: {data.get('pool_id', 'N/A')}{Style.RESET_ALL}")
         
         # Trading information
         data_obj = data.get('data', {})
-        print(f"{Fore.GREEN}Base Token: {data_obj.get('base_token', 'N/A')}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}Quote Token: {data_obj.get('quote_token', 'N/A')}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}Base Vault: {data_obj.get('base_vault', 'N/A')}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}Quote Vault: {data_obj.get('quote_vault', 'N/A')}{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}Base Token: {data_obj.get('base_token', 'N/A')}{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}Quote Token: {data_obj.get('quote_token', 'N/A')}{Style.RESET_ALL}")
         
-        # Reserves and price
-        base_reserve = data_obj.get('base_reserve', 0)
-        quote_reserve = data_obj.get('quote_reserve', 0)
-        price = data_obj.get('price', 0)
-        print(f"{Fore.GREEN}Base Reserve: {base_reserve}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}Quote Reserve: {quote_reserve}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}Current Price: {price:.6f} quote/base{Style.RESET_ALL}")
-        
-        # Timing information
-        time_to_status_6 = data_obj.get('time_to_status_6_ms', 0)
+        # Pool timing
         pool_open_time = data_obj.get('pool_open_time', 0)
-        print(f"{Fore.GREEN}Time to Status 6: {time_to_status_6/1000:.1f}s{Style.RESET_ALL}")
         if pool_open_time > 0:
             pool_open_date = datetime.fromtimestamp(pool_open_time)
-            print(f"{Fore.GREEN}Pool Opened: {pool_open_date.strftime('%Y-%m-%d %H:%M:%S')}{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}Pool Opened: {pool_open_date.strftime('%Y-%m-%d %H:%M:%S')}{Style.RESET_ALL}")
         
-        print(f"{Fore.GREEN}════════════════════════════════════════════════════════════════════════════════{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}════════════════════════════════════════════════════════════════════════════════{Style.RESET_ALL}")
         
     except Exception as e:
         print(f"{Fore.RED}Error processing pool ready message: {str(e)}{Style.RESET_ALL}")
