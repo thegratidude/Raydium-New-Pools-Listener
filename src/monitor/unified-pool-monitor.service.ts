@@ -16,6 +16,7 @@ export interface PoolState {
   pool_open_time: number;
   detected_at: number;
   status_1_detected_at?: number;
+  status_6_detected_at?: number;
   status6SubscriptionId?: number; // NEW: Individual listener for this pool
 }
 
@@ -38,8 +39,9 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
   // Pool tracking - only pending pools (status 1 waiting for status 6)
   private pendingPools: Map<string, PoolState> = new Map();
   
-  // NEW: Message tracking for health monitoring
-  private messageCount = 0;
+  // Message tracking
+  private messageCount = 0; // Resets every minute for health checks
+  private totalMessageCount = 0; // Never resets, for logging
   private lastMessageTime = Date.now();
   
   // Configuration
@@ -176,7 +178,7 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
     const messagesPerMinute = this.messageCount;
     
     return {
-      total_messages: this.messageCount,
+      total_messages: this.totalMessageCount,
       messages_per_minute: messagesPerMinute,
       time_since_last_message_ms: timeSinceLastMessage,
       is_active: timeSinceLastMessage < 60000 // Active if last message was within 1 minute
@@ -209,7 +211,7 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
           if (err) return;
 
           // Silently count messages for health monitoring
-          this.messageCount++;
+          this.totalMessageCount++;
           this.lastMessageTime = Date.now();
           
           // Track message in gateway service for health monitoring
@@ -230,32 +232,32 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
 
   private async startStatus1Monitoring(): Promise<void> {
     try {
+      this.logger.log('🔍 Setting up NEW Status 6 monitoring (pools created within 10 minutes)...');
+      this.logger.log(`🔍 Data size filter: ${LIQUIDITY_STATE_LAYOUT_V4.span} bytes`);
+      
       this.status1SubscriptionId = this.connection.onProgramAccountChange(
         RAYDIUM_PROGRAM_ID,
         async (updatedAccountInfo) => {
-          await this.handleStatus1Detection(updatedAccountInfo);
+          // Only log every 5000th event to avoid spam
+          this.totalMessageCount++;
+          if (this.totalMessageCount % 5000 === 0) {
+            this.logger.log(`🔍 Status 6 listener received event #${this.totalMessageCount}`);
+          }
+          await this.handleNewStatus6Detection(updatedAccountInfo);
         },
         'confirmed',
         [
-          { dataSize: LIQUIDITY_STATE_LAYOUT_V4.span },
-          { 
-            memcmp: { 
-              offset: LIQUIDITY_STATE_LAYOUT_V4.offsetOf('status'),
-              bytes: bs58.encode([1, 0, 0, 0, 0, 0, 0, 0]) // Status 1 in little-endian
-            }
-          }
+          { dataSize: LIQUIDITY_STATE_LAYOUT_V4.span }
         ]
       );
-
-      this.logger.log('✅ Status 1 monitoring active');
-      this.logger.log('🎯 Watching for new pool initializations...');
+      
+      this.logger.log(`🔍 Subscription ID: ${this.status1SubscriptionId}`);
     } catch (error) {
-      this.logger.error('Failed to start status 1 monitoring:', error instanceof Error ? error.message : 'Unknown error');
-      throw error;
+      this.logger.error('Error setting up Status 6 monitoring:', error);
     }
   }
 
-  private async handleStatus1Detection(updatedAccountInfo: any): Promise<void> {
+  private async handleNewStatus6Detection(updatedAccountInfo: any): Promise<void> {
     try {
       const poolId = updatedAccountInfo.accountId.toString();
       
@@ -275,20 +277,34 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
         return;
       }
 
-      // Verify it's actually status 1
-      if (poolState.status !== 1) {
+      // Only look for Status 6 pools
+      if (poolState.status !== 6) {
         return;
       }
 
-      // Check if pool is recent (within last hour)
+      // Check if this is a NEW pool (recently created)
       const currentTime = Math.floor(Date.now() / 1000);
-      if (currentTime - poolState.poolOpenTime > this.config.status6FilterHours * 3600) {
-        this.logger.debug(`Pool ${poolId} too old, skipping`);
+      const poolOpenTime = poolState.poolOpenTime;
+      
+      // Skip pools with invalid open times
+      if (poolOpenTime === 0) {
+        return;
+      }
+      
+      // Skip pools with future open times (more than 5 minutes in future)
+      if (poolOpenTime > currentTime + 300) {
+        return;
+      }
+      
+      // Skip pools that are too old (older than 10 minutes)
+      if (currentTime - poolOpenTime > 600) {
         return;
       }
 
-      this.logger.log(`🎯 STATUS 1 DETECTED: ${poolId}`);
+      // This is a NEW Status 6 pool!
+      this.logger.log(`🚀 NEW STATUS 6 DETECTED: ${poolId}`);
       this.logger.log(`Pool opens at: ${new Date(poolState.poolOpenTime * 1000)}`);
+      this.logger.log(`⏱️  Pool age: ${currentTime - poolOpenTime}s`);
 
       // Get token info
       const tokenInfo = await this.getTokenInfo(poolState.baseMint, poolState.quoteMint);
@@ -302,21 +318,18 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
         pool_id: poolId,
         token_a: tokenInfo.baseToken,
         token_b: tokenInfo.quoteToken,
-        status: 1,
+        status: 6,
         pool_open_time: poolState.poolOpenTime,
         detected_at: Date.now(),
-        status_1_detected_at: Date.now()
+        status_6_detected_at: Date.now()
       };
 
       this.pendingPools.set(poolId, newPoolState);
       this.logger.log(`➕ Added to pending: ${poolId}`);
 
-      // NEW: Add individual listener for this pool to watch for Status 6
-      await this.addIndividualStatus6Listener(poolId);
-
-      // Broadcast status 1 event
+      // Broadcast status 6 event
       this.broadcastEvent({
-        type: 'pool_status_1',
+        type: 'pool_status_6',
         pool_id: poolId,
         timestamp: Date.now(),
         data: {
@@ -327,7 +340,7 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
       });
 
     } catch (error) {
-      this.logger.error(`Error handling status 1 detection:`, error instanceof Error ? error.message : 'Unknown error');
+      this.logger.error(`Error handling new status 6 detection:`, error instanceof Error ? error.message : 'Unknown error');
     }
   }
 
