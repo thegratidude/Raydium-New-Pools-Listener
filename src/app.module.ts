@@ -5,12 +5,13 @@ import { AppService } from './app.service';
 import { RaydiumModule } from './raydium/raydium.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { GatewayModule } from './gateway/gateway.module';
+import { MonitorModule } from './monitor/monitor.module';
 
 const HTTP_URL = process.env.HTTP_URL || 'https://api.mainnet-beta.solana.com';
 const WSS_URL = process.env.WSS_URL || 'wss://api.mainnet-beta.solana.com';
 
 @Module({
-  imports: [RaydiumModule, PrismaModule, GatewayModule],
+  imports: [RaydiumModule, PrismaModule, GatewayModule, MonitorModule],
   controllers: [AppController],
   providers: [
     AppService,

@@ -1,4 +1,6 @@
 solana
 solders
 python-dotenv
+python-socketio
+colorama
 # Add any additional dependencies below as needed 
