@@ -510,14 +510,15 @@ export class TradingService implements OnModuleInit {
   }
 
   private monitorActivePositions(): void {
-    this.logger.log(`📊 Active positions: ${this.activePositions.size}/${this.config.maxPositions}`);
+    // Muted since TradingService is not currently active
+    // this.logger.log(`📊 Active positions: ${this.activePositions.size}/${this.config.maxPositions}`);
     
-    for (const [poolId, position] of this.activePositions.entries()) {
-      if (position.status === 'open') {
-        const duration = Date.now() - position.entry_timestamp;
-        this.logger.log(`Position ${poolId}: ${duration / 1000}s old, risk: ${position.risk_score.toFixed(2)}`);
-      }
-    }
+    // for (const [poolId, position] of this.activePositions.entries()) {
+    //   if (position.status === 'open') {
+    //     const duration = Date.now() - position.entry_timestamp;
+    //     this.logger.log(`Position ${poolId}: ${duration / 1000}s old, risk: ${position.risk_score.toFixed(2)}`);
+    //   }
+    // }
   }
 
   private resetDailyStats(): void {
