@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { PositionManagerService } from './position-manager.service';
+import { SocketService } from '../gateway/socket.service';
 import { Status6Pool, PoolSnapshot } from './database/position-manager-db';
 
 interface ArbitrageOpportunity {
@@ -51,6 +52,7 @@ export class ArbitrageDetectorService implements OnModuleInit {
   constructor(
     private readonly eventEmitter: EventEmitter2,
     private readonly positionManagerService: PositionManagerService,
+    private readonly socketService: SocketService,
   ) {
     this.initializePatterns();
   }
@@ -234,6 +236,13 @@ export class ArbitrageDetectorService implements OnModuleInit {
 
     // Emit event for trading service
     this.eventEmitter.emit('arbitrage_opportunity', opportunity);
+    
+    // Broadcast to Python client via Socket.IO
+    this.socketService.broadcast('arbitrage_opportunity', {
+      pool_id: poolId,
+      timestamp: Date.now(),
+      data: opportunity
+    });
   }
 
   private updateOpportunity(opportunity: ArbitrageOpportunity, data: any) {

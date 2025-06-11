@@ -6,6 +6,7 @@ import { TradingService } from './trading.service';
 import { TradingController } from './trading.controller';
 import { ArbitrageDetectorService } from './arbitrage-detector.service';
 import { EarlyTradingStrategyService } from './early-trading-strategy.service';
+import { GatewayModule } from '../gateway/gateway.module';
 
 @Module({
   imports: [
@@ -19,6 +20,7 @@ import { EarlyTradingStrategyService } from './early-trading-strategy.service';
       verboseMemoryLeak: false,
       ignoreErrors: false,
     }),
+    GatewayModule,
   ],
   controllers: [TradingController],
   providers: [

@@ -4,6 +4,7 @@ import { PositionManagerService } from '../position-manager/position-manager.ser
 import { Status6Pool, PoolSnapshot } from '../position-manager/database/position-manager-db';
 import { Connection, PublicKey } from '@solana/web3.js';
 import * as anchor from '@project-serum/anchor';
+import { EarlyTradingStrategyService } from '../position-manager/early-trading-strategy.service';
 
 /**
  * LifeguardService - Monitors and manages pool monitoring lifecycle
@@ -89,6 +90,7 @@ export class LifeguardService implements OnModuleInit {
   constructor(
     private readonly eventEmitter: EventEmitter2,
     private readonly positionManagerService: PositionManagerService,
+    private readonly earlyTradingService: EarlyTradingStrategyService,
   ) {
     let rpcUrl = process.env.HELIUS_RPC_URL;
     if (!rpcUrl || !rpcUrl.startsWith('http')) {
@@ -507,8 +509,12 @@ export class LifeguardService implements OnModuleInit {
         // Check for extreme conditions
         if (tvlChangePercent < -20) {
           const tvlChangeSOL = tvlSOL - baselineTVLSOL;
-          this.logger.warn(`🚨 RUG DETECTED! Pool ${poolId} TVL dropped ${tvlChangePercent.toFixed(2)}% (${tvlChangeSOL.toFixed(2)} SOL)`);
-          this.logger.warn(`📊 TVL Breakdown: Baseline: ${baselineTVLSOL.toFixed(2)} SOL → Current: ${tvlSOL.toFixed(2)} SOL`);
+          
+          // Only log rug detection if there's an active position in this pool
+          if (this.earlyTradingService && this.earlyTradingService.hasActivePosition(poolId)) {
+            this.logger.warn(`🚨 RUG DETECTED! Pool ${poolId} TVL dropped ${tvlChangePercent.toFixed(2)}% (${tvlChangeSOL.toFixed(2)} SOL)`);
+            this.logger.warn(`📊 TVL Breakdown: Baseline: ${baselineTVLSOL.toFixed(2)} SOL → Current: ${tvlSOL.toFixed(2)} SOL`);
+          }
         }
 
         // Adjust update interval based on activity
@@ -705,11 +711,34 @@ export class LifeguardService implements OnModuleInit {
   }
 
   private stopMonitoring(poolId: string, reason: 'timeout' | 'dead' | 'manual' = 'timeout') {
+    // Check if there are active positions in this pool before stopping
+    if (reason === 'timeout') {
+      try {
+        // Check if EarlyTradingStrategyService has active positions in this pool
+        if (this.earlyTradingService && this.earlyTradingService.hasActivePosition) {
+          const hasActivePosition = this.earlyTradingService.hasActivePosition(poolId);
+          if (hasActivePosition) {
+            this.logger.log(`🔄 Pool ${poolId} has active positions - continuing monitoring beyond 30min window`);
+            // Reschedule the timeout for another 30 minutes
+            const monitor = this.monitoredPools.get(poolId);
+            if (monitor) {
+              clearTimeout(monitor.timeoutId);
+              monitor.timeoutId = setTimeout(() => this.stopMonitoring(poolId, 'timeout'), this.MONITORING_DURATION);
+              this.logger.log(`⏰ Extended monitoring for pool ${poolId} - 30 more minutes`);
+            }
+            return;
+          }
+        }
+      } catch (error) {
+        this.logger.warn(`Error checking active positions for pool ${poolId}:`, error);
+        // Continue with stopping if we can't check positions
+      }
+    }
+
     // Patch: Only stop monitoring on rug if rug recovery is NOT enabled
     if (reason === 'dead') {
       // Check if EarlyTradingStrategyService has rug recovery enabled
-      const earlyTradingService = this.positionManagerService['earlyTradingService'];
-      if (earlyTradingService && earlyTradingService.config && earlyTradingService.config.rugRecovery && earlyTradingService.config.rugRecovery.enabled) {
+      if (this.earlyTradingService && this.earlyTradingService.isRugRecoveryEnabled()) {
         this.logger.log(`[LifeguardService] 🟠 Rug recovery enabled, skipping stopMonitoring for pool ${poolId}`);
         // Still emit rug_detected event
         this.eventEmitter.emit('rug_detected', {

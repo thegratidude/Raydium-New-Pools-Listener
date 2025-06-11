@@ -18,11 +18,10 @@ interface EarlyTradingConfig {
     minBaselineTVL: number; // 10 SOL minimum baseline TVL
   };
   exitConditions: {
-    takeProfitPercent: number; // 25% take profit
-    stopLossPercent: number; // 15% stop loss
+    takeProfitPercent: number; // 15% take profit (reduced from 25%)
+    stopLossPercent: number; // 10% stop loss (reduced from 15%)
     maxHoldTime: number; // 60 minutes max hold
     tvlExitThreshold: number; // -20% TVL drop threshold
-    partialExitPercent: number; // 50% at 15% profit
     trailingStopLoss: {
       enabled: boolean; // Enable trailing stop loss
       activationPercent: number; // Activate trailing stop when profit reaches this % (e.g., 3%)
@@ -38,20 +37,62 @@ interface EarlyTradingConfig {
   };
   rugRecovery: {
     enabled: boolean;
-    maxRecoveryPositions: number; // Max 2 recovery positions at once
-    recoveryPositionSize: number; // 0.5 SOL per recovery position
-    maxRecoveryAttempts: number; // Max 3 recovery attempts per pool
-    recoveryCooldown: number; // 10 minutes between attempts (reduced from 30)
-    takeProfitPercent: number; // 15% take profit for recovery trades
-    stopLossPercent: number; // 10% stop loss for recovery trades
-    maxHoldTime: number; // 30 minutes max hold for recovery (reduced from 45)
+    maxRecoveryPositions: number; // Max 5 recovery positions at once (increased from 2)
+    recoveryPositionSize: number; // 0.2 SOL per recovery position (reduced from 0.5)
+    maxRecoveryAttempts: number; // Max 8 recovery attempts per pool (increased from 3)
+    recoveryCooldown: number; // 2 minutes between attempts (reduced from 10)
+    takeProfitPercent: number; // 15% take profit for recovery trades (reduced from 50%)
+    stopLossPercent: number; // 10% stop loss for recovery trades (reduced from 15%)
+    maxHoldTime: number; // 60 minutes max hold for recovery (increased from 30)
     criteria: {
-      minPriceIncrease: number; // 15% from bottom (reduced from 20%)
-      minTVLIncrease: number; // 20% from bottom (reduced from 50%)
-      minVolumeSpike: number; // 2x normal volume (reduced from 3x)
-      momentumDuration: number; // 2 minutes of sustained growth (reduced from 5)
-      maxRecoveryAge: number; // 4 hours max for recovery attempts (reduced from 24)
-      minBottomDuration: number; // Must stay at bottom for at least 2 minutes (reduced from 10)
+      minPriceIncrease: number; // 5% from bottom (reduced from 15%)
+      minTVLIncrease: number; // 10% from bottom (reduced from 20%)
+      minVolumeSpike: number; // 1.2x normal volume (reduced from 2x)
+      momentumDuration: number; // 30 seconds of sustained growth (reduced from 2 minutes)
+      maxRecoveryAge: number; // 4 hours max for recovery attempts (increased from 1)
+      minBottomDuration: number; // Must stay at bottom for at least 30 seconds (reduced from 2 minutes)
+      // NEW: V-shaped recovery detection
+      vShapeRecovery: {
+        enabled: boolean;
+        minDrop: number; // 30% drop
+        minBounce: number; // 10% bounce
+        maxRecoveryTime: number; // 5 minutes
+        volumeConfirmation: number; // 1.5x volume
+      };
+    };
+  };
+  // NEW: Post-exit monitoring for runner detection
+  postExitMonitoring: {
+    enabled: boolean;
+    duration: number; // 1 hour after exit
+    runnerDetection: {
+      enabled: boolean;
+      minPriceBounce: number; // 15% bounce from recent low
+      minTVLBounce: number; // 10% TVL bounce
+      volumeSpike: number; // 1.5x volume
+      momentumThreshold: number; // 3% sustained growth
+      maxRetracement: number; // Allow 8% retracement
+      reEntrySize: number; // 0.3 SOL for runner re-entries
+    };
+  };
+  // NEW: Enhanced re-entry strategy
+  reEntryStrategy: {
+    enabled: boolean;
+    maxReEntries: number; // 5 re-entries (increased from 3)
+    reEntryCooldown: number; // 1 minute between re-entries (reduced from 2)
+    reEntryCriteria: {
+      minPriceRecovery: number; // 5% recovery from stop loss
+      minTVLRecovery: number; // 8% TVL recovery
+      volumeConfirmation: number; // 1.3x normal volume
+      momentumDuration: number; // 30 seconds of growth
+    };
+    // NEW: Runner momentum detection
+    runnerMomentum: {
+      enabled: boolean;
+      minConsecutiveGrowth: number; // 3 consecutive price increases
+      minGrowthRate: number; // 2% per update
+      volumeAcceleration: number; // 1.2x volume increase
+      maxRetracement: number; // 5% max retracement
     };
   };
 }
@@ -69,14 +110,6 @@ interface EarlyPosition {
   
   // Position sizing
   totalInvestment: number;
-  firstHalfAmount: number;
-  secondHalfAmount: number;
-  
-  // Exit tracking
-  firstHalfExited: boolean;
-  secondHalfExited: boolean;
-  firstExitPrice: number;
-  secondExitPrice: number;
   
   // Status
   status: 'entered' | 'exited' | 'stopped';
@@ -85,14 +118,10 @@ interface EarlyPosition {
   // Performance tracking
   totalPnL: number;
   totalPnLPercent: number;
-  firstHalfPnL: number;
-  secondHalfPnL: number;
   
   // Paper trading tracking
   paperTradeId: string;
   tokensPurchased: number;
-  firstHalfTokens: number;
-  secondHalfTokens: number;
   
   // Progress logging
   lastProgressLog: number;
@@ -123,7 +152,7 @@ interface PoolReEntryTracker {
 export interface PaperTrade {
   id: string;
   poolId: string;
-  type: 'buy' | 'sell' | 'partial_sell';
+  type: 'buy' | 'sell';
   price: number;
   amount: number;
   tokens?: number;
@@ -164,7 +193,7 @@ interface RugRecoveryTracker {
     minTVLIncrease: number; // 50% from bottom
     minVolumeSpike: number; // 3x normal volume
     momentumDuration: number; // 5 minutes of sustained growth
-    maxRecoveryAge: number; // 24 hours max for recovery attempts
+    maxRecoveryAge: number; // 1 hour max for recovery attempts (reduced from 4)
   };
 }
 
@@ -176,13 +205,63 @@ interface RugRecoveryPosition {
   bottomPrice: number;
   entryTime: number;
   lastUpdate: number;
-  investment: number; // 0.5 SOL
+  investment: number; // 0.2 SOL
   tokensPurchased: number;
   status: 'active' | 'exited';
   exitReason: string;
   pnl: number;
   pnlPercent: number;
   recoveryAttempt: number;
+}
+
+// NEW: Post-exit monitoring for runner detection
+interface PostExitTracker {
+  poolId: string;
+  exitTime: number;
+  exitPrice: number;
+  exitReason: string;
+  bottomPrice: number;
+  bottomTime: number;
+  monitoringEndTime: number;
+  isMonitoring: boolean;
+  runnerDetectionAttempts: number;
+  maxRunnerAttempts: number;
+  lastRunnerAttempt: number;
+  runnerCooldown: number; // 2 minutes between runner attempts
+}
+
+// NEW: Runner position tracking
+interface RunnerPosition {
+  id: string;
+  poolId: string;
+  entryPrice: number;
+  currentPrice: number;
+  bottomPrice: number;
+  entryTime: number;
+  lastUpdate: number;
+  investment: number; // 0.3 SOL
+  tokensPurchased: number;
+  status: 'active' | 'exited';
+  exitReason: string;
+  pnl: number;
+  pnlPercent: number;
+  runnerAttempt: number;
+  consecutiveGrowth: number;
+  momentumScore: number;
+}
+
+// NEW: V-shape recovery detection
+interface VShapeRecovery {
+  poolId: string;
+  dropStartPrice: number;
+  dropStartTime: number;
+  bottomPrice: number;
+  bottomTime: number;
+  recoveryStartPrice: number;
+  recoveryStartTime: number;
+  isDetected: boolean;
+  volumeConfirmation: boolean;
+  momentumScore: number;
 }
 
 @Injectable()
@@ -205,16 +284,15 @@ export class EarlyTradingStrategyService implements OnModuleInit, OnModuleDestro
       minBaselineTVL: 10, // 10 SOL minimum baseline TVL
     },
     exitConditions: {
-      takeProfitPercent: 25, // 25% take profit
-      stopLossPercent: 8, // 8% stop loss (tighter than 10%)
+      takeProfitPercent: 15, // 15% take profit (reduced from 25%)
+      stopLossPercent: 10, // 10% stop loss (reduced from 15%)
       maxHoldTime: 60, // 60 minutes max hold
       tvlExitThreshold: -20, // -20% TVL drop threshold
-      partialExitPercent: 50, // 50% at 15% profit
       trailingStopLoss: {
         enabled: true, // Enable trailing stop loss
-        activationPercent: 2, // Activate trailing stop when profit reaches 2% (down from 3%)
-        trailingDistance: 1.5, // Distance behind current price (1.5% down from 2%)
-        breakevenLock: 6, // Move to breakeven at 6% profit (down from 8%)
+        activationPercent: 3, // Activate trailing stop when profit reaches this % (e.g., 3%)
+        trailingDistance: 2, // Distance behind current price (e.g., 2%)
+        breakevenLock: 8, // Move to breakeven at this profit % (e.g., 8%)
       },
     },
     riskManagement: {
@@ -225,20 +303,60 @@ export class EarlyTradingStrategyService implements OnModuleInit, OnModuleDestro
     },
     rugRecovery: {
       enabled: true,
-      maxRecoveryPositions: 2, // Max 2 recovery positions at once
-      recoveryPositionSize: 0.5, // 0.5 SOL per recovery position
-      maxRecoveryAttempts: 3, // Max 3 recovery attempts per pool
-      recoveryCooldown: 10 * 60 * 1000, // 10 minutes between attempts (reduced from 30)
-      takeProfitPercent: 15, // 15% take profit for recovery trades
-      stopLossPercent: 10, // 10% stop loss for recovery trades
-      maxHoldTime: 30 * 60 * 1000, // 30 minutes max hold for recovery (reduced from 45)
+      maxRecoveryPositions: 5, // Max 5 recovery positions at once (increased from 2)
+      recoveryPositionSize: 0.2, // 0.2 SOL per recovery position (reduced from 0.5)
+      maxRecoveryAttempts: 8, // Max 8 recovery attempts per pool (increased from 3)
+      recoveryCooldown: 2 * 60 * 1000, // 2 minutes between attempts (reduced from 10)
+      takeProfitPercent: 15, // 15% take profit for recovery trades (reduced from 50%)
+      stopLossPercent: 10, // 10% stop loss for recovery trades (reduced from 15%)
+      maxHoldTime: 60 * 60 * 1000, // 60 minutes max hold for recovery (increased from 30)
       criteria: {
-        minPriceIncrease: 15, // 15% from bottom (reduced from 20%)
-        minTVLIncrease: 20, // 20% from bottom (reduced from 50%)
-        minVolumeSpike: 2, // 2x normal volume (reduced from 3x)
-        momentumDuration: 2 * 60 * 1000, // 2 minutes of sustained growth (reduced from 5)
-        maxRecoveryAge: 4 * 60 * 60 * 1000, // 4 hours max for recovery attempts (reduced from 24)
-        minBottomDuration: 2 * 60 * 1000, // Must stay at bottom for at least 2 minutes (reduced from 10)
+        minPriceIncrease: 5, // 5% from bottom (reduced from 15%)
+        minTVLIncrease: 10, // 10% from bottom (reduced from 20%)
+        minVolumeSpike: 1.2, // 1.2x normal volume (reduced from 2x)
+        momentumDuration: 30 * 1000, // 30 seconds of sustained growth (reduced from 2 minutes)
+        maxRecoveryAge: 4 * 60 * 60 * 1000, // 4 hours max for recovery attempts (increased from 1)
+        minBottomDuration: 30 * 1000, // Must stay at bottom for at least 30 seconds (reduced from 2 minutes)
+        // NEW: V-shaped recovery detection
+        vShapeRecovery: {
+          enabled: false,
+          minDrop: 30, // 30% drop
+          minBounce: 10, // 10% bounce
+          maxRecoveryTime: 5 * 60 * 1000, // 5 minutes
+          volumeConfirmation: 1.5, // 1.5x volume
+        },
+      },
+    },
+    postExitMonitoring: {
+      enabled: true,
+      duration: 60 * 60 * 1000, // 1 hour after exit
+      runnerDetection: {
+        enabled: true,
+        minPriceBounce: 15, // 15% bounce from recent low
+        minTVLBounce: 10, // 10% TVL bounce
+        volumeSpike: 1.5, // 1.5x volume
+        momentumThreshold: 3, // 3% sustained growth
+        maxRetracement: 8, // Allow 8% retracement
+        reEntrySize: 0.3, // 0.3 SOL for runner re-entries
+      },
+    },
+    reEntryStrategy: {
+      enabled: true,
+      maxReEntries: 5, // 5 re-entries (increased from 3)
+      reEntryCooldown: 60 * 1000, // 1 minute between re-entries (reduced from 2)
+      reEntryCriteria: {
+        minPriceRecovery: 5, // 5% recovery from stop loss
+        minTVLRecovery: 8, // 8% TVL recovery
+        volumeConfirmation: 1.3, // 1.3x normal volume
+        momentumDuration: 30 * 1000, // 30 seconds of growth
+      },
+      // NEW: Runner momentum detection
+      runnerMomentum: {
+        enabled: true,
+        minConsecutiveGrowth: 3, // 3 consecutive price increases
+        minGrowthRate: 2, // 2% per update
+        volumeAcceleration: 1.2, // 1.2x volume increase
+        maxRetracement: 5, // 5% max retracement
       },
     },
   };
@@ -247,6 +365,10 @@ export class EarlyTradingStrategyService implements OnModuleInit, OnModuleDestro
   private poolReEntryTrackers: Map<string, PoolReEntryTracker> = new Map();
   private rugRecoveryTrackers: Map<string, RugRecoveryTracker> = new Map();
   private rugRecoveryPositions: Map<string, RugRecoveryPosition> = new Map();
+  // NEW: Enhanced tracking for Phase 1
+  private postExitTrackers: Map<string, PostExitTracker> = new Map();
+  private runnerPositions: Map<string, RunnerPosition> = new Map();
+  private vShapeRecoveries: Map<string, VShapeRecovery> = new Map();
   
   // Timer tracking for graceful shutdown
   private backgroundTimers: NodeJS.Timeout[] = [];
@@ -319,6 +441,24 @@ export class EarlyTradingStrategyService implements OnModuleInit, OnModuleDestro
     }, 30000);
     this.backgroundTimers.push(rugRecoveryTimer);
 
+    // NEW: Monitor post-exit tracking every 15 seconds for runner detection
+    const postExitTimer = setInterval(() => {
+      this.monitorPostExitTracking();
+    }, 15000);
+    this.backgroundTimers.push(postExitTimer);
+
+    // NEW: Monitor runner positions every 10 seconds
+    const runnerTimer = setInterval(() => {
+      this.monitorRunnerPositions();
+    }, 10000);
+    this.backgroundTimers.push(runnerTimer);
+
+    // NEW: Monitor V-shape recoveries every 20 seconds
+    const vShapeTimer = setInterval(() => {
+      this.monitorVShapeRecoveries();
+    }, 20000);
+    this.backgroundTimers.push(vShapeTimer);
+
     // Reset daily stats every 24 hours
     const dailyStatsTimer = setInterval(() => {
       this.resetDailyStats();
@@ -329,11 +469,64 @@ export class EarlyTradingStrategyService implements OnModuleInit, OnModuleDestro
   private monitorRugRecovery() {
     // This method will be called every 30 seconds to check rug recovery status
     // The actual monitoring logic is in handleRugRecoveryUpdate
-    const activeTrackers = this.rugRecoveryTrackers.size;
-    const activeRecoveryPositions = this.rugRecoveryPositions.size;
+    // Running silently in the background - no periodic logging
+  }
+
+  // NEW: Monitor post-exit tracking for runner detection
+  private monitorPostExitTracking() {
+    const now = Date.now();
     
-    if (activeTrackers > 0 || activeRecoveryPositions > 0) {
-      this.logger.log(`🔍 RUG RECOVERY MONITORING: ${activeTrackers} trackers, ${activeRecoveryPositions} positions`);
+    for (const [poolId, tracker] of this.postExitTrackers.entries()) {
+      // Check if monitoring period has expired
+      if (now > tracker.monitoringEndTime) {
+        this.logger.log(`⏰ Post-exit monitoring expired for pool ${poolId} - stopping runner detection`);
+        this.postExitTrackers.delete(poolId);
+        continue;
+      }
+
+      // Check if we can attempt another runner detection
+      if (tracker.isMonitoring && 
+          tracker.runnerDetectionAttempts < tracker.maxRunnerAttempts &&
+          now - tracker.lastRunnerAttempt >= tracker.runnerCooldown) {
+        
+        // This will be handled by handlePoolMetricsUpdate when new data comes in
+        // Just log that we're ready for runner detection
+        if (now - tracker.lastRunnerAttempt >= tracker.runnerCooldown * 2) {
+          this.logger.log(`🎯 Ready for runner detection on pool ${poolId} (attempt ${tracker.runnerDetectionAttempts + 1}/${tracker.maxRunnerAttempts})`);
+        }
+      }
+    }
+  }
+
+  // NEW: Monitor runner positions
+  private monitorRunnerPositions() {
+    for (const [positionId, position] of this.runnerPositions.entries()) {
+      if (position.status === 'active') {
+        // Check exit conditions for runner positions
+        this.checkRunnerExitConditions(position);
+      }
+    }
+  }
+
+  // NEW: Monitor V-shape recoveries
+  private monitorVShapeRecoveries() {
+    const now = Date.now();
+    
+    for (const [poolId, vShape] of this.vShapeRecoveries.entries()) {
+      // Check if V-shape recovery time has expired
+      if (vShape.recoveryStartTime && 
+          now - vShape.recoveryStartTime > this.config.rugRecovery.criteria.vShapeRecovery.maxRecoveryTime) {
+        this.logger.log(`⏰ V-shape recovery time expired for pool ${poolId} - removing from tracking`);
+        this.vShapeRecoveries.delete(poolId);
+        continue;
+      }
+
+      // If V-shape is detected and confirmed, attempt recovery
+      if (vShape.isDetected && vShape.volumeConfirmation && !vShape.recoveryStartTime) {
+        this.logger.log(`📈 V-shape recovery confirmed for pool ${poolId} - attempting recovery entry`);
+        vShape.recoveryStartTime = now;
+        // This will trigger recovery logic in handleRugRecoveryUpdate
+      }
     }
   }
 
@@ -349,6 +542,18 @@ export class EarlyTradingStrategyService implements OnModuleInit, OnModuleDestro
     const position = this.activePositions.get(poolId);
     if (position) {
       this.updatePosition(position, data);
+    }
+
+    // NEW: Handle post-exit monitoring for runner detection
+    const postExitTracker = this.postExitTrackers.get(poolId);
+    if (postExitTracker && postExitTracker.isMonitoring) {
+      this.handlePostExitUpdate(poolId, data, postExitTracker);
+    }
+
+    // NEW: Handle V-shape recovery detection
+    const vShapeRecovery = this.vShapeRecoveries.get(poolId);
+    if (vShapeRecovery) {
+      this.handleVShapeRecoveryUpdate(poolId, data, vShapeRecovery);
     }
   }
 
@@ -445,6 +650,8 @@ export class EarlyTradingStrategyService implements OnModuleInit, OnModuleDestro
     this.logger.log(`   Rug TVL: ${rugTVL.toFixed(2)} SOL`);
     this.logger.log(`   Max Recovery Attempts: ${tracker.maxRecoveryAttempts}`);
     this.logger.log(`   Recovery Cooldown: ${tracker.recoveryCooldown / 1000 / 60} minutes`);
+    this.logger.log(`   Monitoring Duration: 1 hour (will stop automatically)`);
+    this.logger.log(`   Monitoring will continue silently in the background...`);
   }
 
   private handleRugRecoveryUpdate(data: any) {
@@ -459,7 +666,7 @@ export class EarlyTradingStrategyService implements OnModuleInit, OnModuleDestro
     
     // Check if recovery monitoring has expired
     if (now - tracker.rugTime > tracker.recoveryCriteria.maxRecoveryAge) {
-      this.logger.log(`⏰ RUG RECOVERY MONITORING EXPIRED: Pool ${poolId} (${tracker.recoveryCriteria.maxRecoveryAge / 1000 / 60 / 60} hours)`);
+      this.logger.log(`⏰ RUG RECOVERY MONITORING EXPIRED: Pool ${poolId} (1 hour limit reached)`);
       this.stopRugRecoveryMonitoring(poolId, 'monitoring_expired');
       return;
     }
@@ -468,7 +675,7 @@ export class EarlyTradingStrategyService implements OnModuleInit, OnModuleDestro
     if (currentPrice < tracker.bottomPrice) {
       tracker.bottomPrice = currentPrice;
       tracker.bottomTime = now;
-      this.logger.log(`📉 NEW BOTTOM: Pool ${poolId} at ${currentPrice.toFixed(8)} SOL`);
+      // Silently update bottom price without logging
     }
 
     // Check if we should attempt recovery
@@ -480,6 +687,68 @@ export class EarlyTradingStrategyService implements OnModuleInit, OnModuleDestro
     const recoveryPosition = this.rugRecoveryPositions.get(poolId);
     if (recoveryPosition) {
       this.updateRugRecoveryPosition(recoveryPosition, data);
+    }
+  }
+
+  // NEW: Handle post-exit monitoring updates
+  private handlePostExitUpdate(poolId: string, data: any, tracker: PostExitTracker) {
+    const { currentPrice, currentTVL, volume24h } = data;
+    const now = Date.now();
+
+    // Update bottom price if we find a lower price
+    if (currentPrice < tracker.bottomPrice) {
+      tracker.bottomPrice = currentPrice;
+      tracker.bottomTime = now;
+    }
+
+    // Check if we should attempt runner detection
+    if (this.shouldAttemptRunnerDetection(tracker, data)) {
+      this.attemptRunnerDetection(poolId, tracker, data);
+    }
+
+    // Update existing runner positions
+    const runnerPosition = this.runnerPositions.get(poolId);
+    if (runnerPosition) {
+      this.updateRunnerPosition(runnerPosition, data);
+    }
+  }
+
+  // NEW: Handle V-shape recovery updates
+  private handleVShapeRecoveryUpdate(poolId: string, data: any, vShape: VShapeRecovery) {
+    const { currentPrice, volume24h } = data;
+    const now = Date.now();
+
+    // If we haven't detected the drop yet, check for significant price drop
+    if (!vShape.isDetected) {
+      const priceDrop = ((vShape.dropStartPrice - currentPrice) / vShape.dropStartPrice) * 100;
+      
+      if (priceDrop >= this.config.rugRecovery.criteria.vShapeRecovery.minDrop) {
+        vShape.bottomPrice = currentPrice;
+        vShape.bottomTime = now;
+        vShape.isDetected = true;
+        
+        this.logger.log(`📉 V-SHAPE DROP DETECTED: Pool ${poolId}`);
+        this.logger.log(`   Drop: ${priceDrop.toFixed(2)}% (min: ${this.config.rugRecovery.criteria.vShapeRecovery.minDrop}%)`);
+        this.logger.log(`   Bottom Price: ${currentPrice.toFixed(8)} SOL`);
+      }
+    } else if (!vShape.volumeConfirmation) {
+      // Check for volume confirmation
+      if (volume24h > 0) { // We'll need to implement proper volume tracking
+        vShape.volumeConfirmation = true;
+        this.logger.log(`📊 V-SHAPE VOLUME CONFIRMED: Pool ${poolId}`);
+      }
+    } else if (!vShape.recoveryStartTime) {
+      // Check for bounce from bottom
+      const bounce = ((currentPrice - vShape.bottomPrice) / vShape.bottomPrice) * 100;
+      
+      if (bounce >= this.config.rugRecovery.criteria.vShapeRecovery.minBounce) {
+        vShape.recoveryStartPrice = currentPrice;
+        vShape.recoveryStartTime = now;
+        
+        this.logger.log(`📈 V-SHAPE RECOVERY STARTED: Pool ${poolId}`);
+        this.logger.log(`   Bounce: ${bounce.toFixed(2)}% (min: ${this.config.rugRecovery.criteria.vShapeRecovery.minBounce}%)`);
+        this.logger.log(`   Recovery Price: ${currentPrice.toFixed(8)} SOL`);
+      }
     }
   }
 
@@ -530,6 +799,116 @@ export class EarlyTradingStrategyService implements OnModuleInit, OnModuleDestro
     }
 
     return false;
+  }
+
+  // NEW: Check if we should attempt runner detection
+  private shouldAttemptRunnerDetection(tracker: PostExitTracker, data: any): boolean {
+    const { currentPrice, currentTVL, volume24h } = data;
+    const now = Date.now();
+
+    // Check if we've reached max attempts
+    if (tracker.runnerDetectionAttempts >= tracker.maxRunnerAttempts) {
+      return false;
+    }
+
+    // Check cooldown period
+    if (now - tracker.lastRunnerAttempt < tracker.runnerCooldown) {
+      return false;
+    }
+
+    // Check if we have enough balance
+    if (this.paperPortfolio.balance < this.config.postExitMonitoring.runnerDetection.reEntrySize) {
+      return false;
+    }
+
+    // Calculate bounce metrics
+    const priceBounce = ((currentPrice - tracker.bottomPrice) / tracker.bottomPrice) * 100;
+    const tvlBounce = ((currentTVL - tracker.bottomPrice) / tracker.bottomPrice) * 100; // Using bottom price as proxy for TVL
+
+    // Check runner detection criteria
+    const meetsPriceBounce = priceBounce >= this.config.postExitMonitoring.runnerDetection.minPriceBounce;
+    const meetsTVLBounce = tvlBounce >= this.config.postExitMonitoring.runnerDetection.minTVLBounce;
+    const meetsVolumeSpike = volume24h > 0; // We'll need to implement proper volume tracking
+
+    if (meetsPriceBounce && meetsTVLBounce && meetsVolumeSpike) {
+      this.logger.log(`🚀 RUNNER DETECTION CRITERIA MET: Pool ${tracker.poolId}`);
+      this.logger.log(`   Price bounce: ${priceBounce.toFixed(2)}% (min: ${this.config.postExitMonitoring.runnerDetection.minPriceBounce}%)`);
+      this.logger.log(`   TVL bounce: ${tvlBounce.toFixed(2)}% (min: ${this.config.postExitMonitoring.runnerDetection.minTVLBounce}%)`);
+      this.logger.log(`   Runner attempt: ${tracker.runnerDetectionAttempts + 1}/${tracker.maxRunnerAttempts}`);
+      return true;
+    }
+
+    return false;
+  }
+
+  // NEW: Attempt runner detection and entry
+  private attemptRunnerDetection(poolId: string, tracker: PostExitTracker, data: any) {
+    const { currentPrice, currentTVL } = data;
+    
+    // Create runner position
+    const positionId = `runner_${poolId}_${Date.now()}`;
+    const investment = this.config.postExitMonitoring.runnerDetection.reEntrySize;
+    const tokensPurchased = investment / currentPrice;
+    
+    const runnerPosition: RunnerPosition = {
+      id: positionId,
+      poolId,
+      entryPrice: currentPrice,
+      currentPrice,
+      bottomPrice: tracker.bottomPrice,
+      entryTime: Date.now(),
+      lastUpdate: Date.now(),
+      investment,
+      tokensPurchased,
+      status: 'active',
+      exitReason: '',
+      pnl: 0,
+      pnlPercent: 0,
+      runnerAttempt: tracker.runnerDetectionAttempts + 1,
+      consecutiveGrowth: 0,
+      momentumScore: 0.5, // Start with neutral momentum
+    };
+    
+    // Execute paper buy
+    const buyResult = this.executePaperBuy(poolId, currentPrice, investment);
+    
+    if (buyResult.success) {
+      this.runnerPositions.set(positionId, runnerPosition);
+      tracker.runnerDetectionAttempts++;
+      tracker.lastRunnerAttempt = Date.now();
+      
+      this.logger.log(`🚀 RUNNER POSITION ENTERED: Pool ${poolId}`);
+      this.logger.log(`   Entry Price: ${currentPrice.toFixed(8)} SOL`);
+      this.logger.log(`   Investment: ${investment.toFixed(2)} SOL`);
+      this.logger.log(`   Tokens: ${tokensPurchased.toFixed(2)}`);
+      this.logger.log(`   Runner Attempt: ${runnerPosition.runnerAttempt}/${tracker.maxRunnerAttempts}`);
+    } else {
+      this.logger.error(`❌ Failed to enter runner position for pool ${poolId}: ${buyResult.error}`);
+    }
+  }
+
+  // NEW: Update runner position
+  private updateRunnerPosition(position: RunnerPosition, data: any) {
+    const { currentPrice, volume24h } = data;
+    
+    // Update position data
+    position.currentPrice = currentPrice;
+    position.lastUpdate = Date.now();
+    
+    // Calculate PnL
+    const totalValue = position.tokensPurchased * currentPrice;
+    position.pnl = totalValue - position.investment;
+    position.pnlPercent = (position.pnl / position.investment) * 100;
+    
+    // Update momentum score
+    const priceChange = ((currentPrice - position.entryPrice) / position.entryPrice) * 100;
+    if (priceChange > 0) {
+      position.consecutiveGrowth++;
+      position.momentumScore = Math.min(1.0, position.momentumScore + 0.1);
+    } else {
+      position.consecutiveGrowth = 0;
+      position.momentumScore = Math.max(0.0, position.momentumScore - 0.1);
+    }
   }
 
   private attemptRugRecovery(poolId: string, tracker: RugRecoveryTracker, data: any) {
@@ -600,23 +979,22 @@ export class EarlyTradingStrategyService implements OnModuleInit, OnModuleDestro
   }
 
   private checkRugRecoveryExitConditions(position: RugRecoveryPosition) {
-    const now = Date.now();
-    const timeSinceEntry = now - position.entryTime;
+    const timeSinceEntry = Date.now() - position.entryTime;
     const priceChangePercent = position.pnlPercent;
     
-    // Check take profit (15%)
+    // Check take profit (50%)
     if (priceChangePercent >= this.config.rugRecovery.takeProfitPercent) {
       this.executeRugRecoveryExit(position, 'take_profit', `${this.config.rugRecovery.takeProfitPercent}% profit target reached`);
       return;
     }
     
-    // Check stop loss (10%)
+    // Check stop loss (15%)
     if (priceChangePercent <= -this.config.rugRecovery.stopLossPercent) {
       this.executeRugRecoveryExit(position, 'stop_loss', `${this.config.rugRecovery.stopLossPercent}% stop loss triggered`);
       return;
     }
     
-    // Check max hold time (30 minutes)
+    // Check max hold time (60 minutes)
     if (timeSinceEntry >= this.config.rugRecovery.maxHoldTime) {
       this.executeRugRecoveryExit(position, 'timeout', `Max hold time of ${this.config.rugRecovery.maxHoldTime / 1000 / 60} minutes exceeded`);
       return;
@@ -624,66 +1002,87 @@ export class EarlyTradingStrategyService implements OnModuleInit, OnModuleDestro
   }
 
   private executeRugRecoveryExit(position: RugRecoveryPosition, reason: string, message: string) {
-    const currentPrice = position.currentPrice;
-    const totalValue = position.tokensPurchased * currentPrice;
-    const totalPnL = totalValue - position.investment;
-    const totalPnLPercent = position.pnlPercent;
+    const exitPrice = position.currentPrice;
+    const pnl = position.pnl;
+    const pnlPercent = position.pnlPercent;
     
     // Execute paper sell
-    const sellResult = this.executePaperSell(position.poolId, currentPrice, position.investment, false);
-    if (!sellResult.success) {
-      this.logger.error(`❌ Rug recovery paper sell failed for pool ${position.poolId}: ${sellResult.error}`);
-      return;
-    }
+    const sellResult = this.executePaperSell(position.poolId, exitPrice, position.investment);
     
-    // Update position status
-    position.status = 'exited';
-    position.exitReason = reason;
-    
-    this.logger.log(`🎯 RUG RECOVERY EXIT: ${position.poolId} | ${reason.toUpperCase()}`);
-    this.logger.log(`📊 Final Result: ${totalPnLPercent.toFixed(2)}% profit in ${Math.round((Date.now() - position.entryTime) / 1000 / 60)} minutes`);
-    this.logger.log(`💰 Total PnL: ${totalPnL.toFixed(4)} SOL`);
-    this.logger.log(`💡 Reason: ${message}`);
-    this.logger.log(`📊 Paper Trade: ${position.tokensPurchased.toFixed(2)} tokens sold for ${totalValue.toFixed(4)} SOL`);
-    this.logger.log(`💰 Portfolio Balance: ${this.paperPortfolio.balance.toFixed(4)} SOL`);
-    
-    // Remove from active recovery positions
-    this.rugRecoveryPositions.delete(position.poolId);
-    
-    // Emit recovery position exited event
-    this.eventEmitter.emit('rug_recovery_position_exited', {
-      position_id: position.id,
-      pool_id: position.poolId,
-      exit_price: currentPrice,
-      pnl: totalPnL,
-      pnl_percentage: totalPnLPercent,
-      reason,
-      recovery_attempt: position.recoveryAttempt,
-      timestamp: Date.now()
-    });
-    
-    // If this was a successful recovery, stop monitoring
-    if (totalPnLPercent > 0) {
-      this.logger.log(`✅ SUCCESSFUL RUG RECOVERY: Stopping monitoring for pool ${position.poolId}`);
-      this.stopRugRecoveryMonitoring(position.poolId, 'successful_recovery');
+    if (sellResult.success) {
+      this.logger.log(`💰 RUG RECOVERY EXIT: Pool ${position.poolId} - ${reason}`);
+      this.logger.log(`   Entry: ${position.entryPrice.toFixed(8)} SOL`);
+      this.logger.log(`   Exit: ${exitPrice.toFixed(8)} SOL`);
+      this.logger.log(`   PnL: ${pnl.toFixed(4)} SOL (${pnlPercent.toFixed(2)}%)`);
+      this.logger.log(`   Investment: ${position.investment.toFixed(2)} SOL`);
+      this.logger.log(`   Message: ${message}`);
+      
+      // Update daily stats
+      this.dailyStats.totalTrades++;
+      if (pnl > 0) {
+        this.dailyStats.successfulTrades++;
+      } else {
+        this.dailyStats.failedTrades++;
+        this.dailyStats.dailyLoss += Math.abs(pnl);
+      }
+      this.dailyStats.totalPnL += pnl;
+      
+      // Remove from active positions
+      this.rugRecoveryPositions.delete(position.id);
+      
+      // Check if we should continue monitoring for more recovery opportunities
+      const tracker = this.rugRecoveryTrackers.get(position.poolId);
+      if (tracker && tracker.recoveryAttempts < tracker.maxRecoveryAttempts) {
+        this.logger.log(`🔄 Continuing rug recovery monitoring for pool ${position.poolId} (${tracker.recoveryAttempts}/${tracker.maxRecoveryAttempts} attempts)`);
+      } else {
+        this.stopRugRecoveryMonitoring(position.poolId, 'max attempts reached');
+      }
+    } else {
+      this.logger.error(`❌ Failed to execute rug recovery exit for pool ${position.poolId}: ${sellResult.error}`);
     }
   }
 
   private stopRugRecoveryMonitoring(poolId: string, reason: string) {
     const tracker = this.rugRecoveryTrackers.get(poolId);
-    if (!tracker) {
-      return;
+    if (tracker) {
+      tracker.isMonitoring = false;
+      this.logger.log(`🛑 Stopped rug recovery monitoring for pool ${poolId}: ${reason}`);
+      
+      // Remove tracker after a delay to allow for cleanup
+      setTimeout(() => {
+        this.rugRecoveryTrackers.delete(poolId);
+      }, 5000);
     }
+  }
+
+  // NEW: Start post-exit monitoring for runner detection
+  private startPostExitMonitoring(poolId: string, exitPrice: number, exitReason: string, pnlPercent: number) {
+    const now = Date.now();
+    const monitoringEndTime = now + this.config.postExitMonitoring.duration;
     
-    tracker.isMonitoring = false;
-    this.logger.log(`🛑 STOPPED RUG RECOVERY MONITORING: Pool ${poolId} - ${reason}`);
-    this.logger.log(`   Total recovery attempts: ${tracker.recoveryAttempts}/${tracker.maxRecoveryAttempts}`);
-    this.logger.log(`   Monitoring duration: ${Math.round((Date.now() - tracker.rugTime) / 1000 / 60)} minutes`);
+    const tracker: PostExitTracker = {
+      poolId,
+      exitTime: now,
+      exitPrice,
+      exitReason,
+      bottomPrice: exitPrice, // Will be updated as we track the bottom
+      bottomTime: now,
+      monitoringEndTime,
+      isMonitoring: true,
+      runnerDetectionAttempts: 0,
+      maxRunnerAttempts: 5, // Allow 5 runner detection attempts
+      lastRunnerAttempt: 0,
+      runnerCooldown: 2 * 60 * 1000, // 2 minutes between attempts
+    };
     
-    // Remove tracker after a delay to allow for cleanup
-    setTimeout(() => {
-      this.rugRecoveryTrackers.delete(poolId);
-    }, 60000); // 1 minute delay
+    this.postExitTrackers.set(poolId, tracker);
+    
+    this.logger.log(`🎯 STARTED POST-EXIT MONITORING: Pool ${poolId}`);
+    this.logger.log(`   Exit Price: ${exitPrice.toFixed(8)} SOL`);
+    this.logger.log(`   Exit Reason: ${exitReason}`);
+    this.logger.log(`   PnL: ${pnlPercent.toFixed(2)}%`);
+    this.logger.log(`   Monitoring Duration: ${this.config.postExitMonitoring.duration / 1000 / 60} minutes`);
+    this.logger.log(`   Runner Detection: ${this.config.postExitMonitoring.runnerDetection.enabled ? 'ENABLED' : 'DISABLED'}`);
   }
 
   private shouldEnterEarlyPosition(data: any): boolean {
@@ -702,7 +1101,7 @@ export class EarlyTradingStrategyService implements OnModuleInit, OnModuleDestro
     // Check re-entry eligibility
     const reEntryTracker = this.poolReEntryTrackers.get(poolId);
     if (reEntryTracker && reEntryTracker.reEntryCount >= reEntryTracker.maxReEntries) {
-      this.logger.log(`🚫 Pool ${poolId} has reached maximum re-entries (${reEntryTracker.maxReEntries})`);
+      // Silently skip pools that have reached maximum re-entries
       return false;
     }
     
@@ -796,14 +1195,6 @@ export class EarlyTradingStrategyService implements OnModuleInit, OnModuleDestro
       
       // Position sizing
       totalInvestment: positionSize,
-      firstHalfAmount: positionSize * 0.5,
-      secondHalfAmount: positionSize * 0.5,
-      
-      // Exit tracking
-      firstHalfExited: false,
-      secondHalfExited: false,
-      firstExitPrice: 0,
-      secondExitPrice: 0,
       
       // Status
       status: 'entered',
@@ -812,14 +1203,10 @@ export class EarlyTradingStrategyService implements OnModuleInit, OnModuleDestro
       // Performance tracking
       totalPnL: 0,
       totalPnLPercent: 0,
-      firstHalfPnL: 0,
-      secondHalfPnL: 0,
       
       // Paper trading tracking
       paperTradeId: buyResult.tradeId,
       tokensPurchased: buyResult.tokens,
-      firstHalfTokens: buyResult.tokens * 0.5,
-      secondHalfTokens: buyResult.tokens * 0.5,
       
       // Progress logging
       lastProgressLog: Date.now(),
@@ -908,15 +1295,15 @@ export class EarlyTradingStrategyService implements OnModuleInit, OnModuleDestro
     }
   }
 
-  private executePaperSell(poolId: string, price: number, amount: number, isPartial: boolean = false): { success: boolean; tradeId?: string; tokens?: number; pnl?: number; error?: string } {
+  private executePaperSell(poolId: string, price: number, amount: number): { success: boolean; tradeId?: string; tokens?: number; pnl?: number; error?: string } {
     try {
       const position = this.paperPortfolio.positions.get(poolId);
       if (!position) {
         return { success: false, error: `No position found for pool ${poolId}` };
       }
 
-      // Calculate tokens to sell
-      const tokensToSell = isPartial ? position.tokens * 0.5 : position.tokens;
+      // Always sell the full position
+      const tokensToSell = position.tokens;
       const solValue = tokensToSell * price;
       
       // Calculate PnL
@@ -932,20 +1319,15 @@ export class EarlyTradingStrategyService implements OnModuleInit, OnModuleDestro
       this.paperPortfolio.balance += solValue;
       this.paperPortfolio.totalPnL += pnl;
 
-      if (isPartial) {
-        // Partial exit - reduce position
-        position.tokens -= tokensToSell;
-      } else {
-        // Full exit - remove position
-        this.paperPortfolio.positions.delete(poolId);
-      }
+      // Full exit - remove position
+      this.paperPortfolio.positions.delete(poolId);
 
       // Record trade
       const tradeId = `paper_sell_${poolId}_${Date.now()}`;
       const trade: PaperTrade = {
         id: tradeId,
         poolId,
-        type: isPartial ? 'partial_sell' : 'sell',
+        type: 'sell',
         price,
         amount: solValue,
         tokens: tokensToSell,
@@ -1082,7 +1464,7 @@ export class EarlyTradingStrategyService implements OnModuleInit, OnModuleDestro
     const totalPnLPercent = position.totalPnLPercent;
     
     // Execute paper sell
-    const sellResult = this.executePaperSell(position.poolId, currentPrice, position.totalInvestment, false);
+    const sellResult = this.executePaperSell(position.poolId, currentPrice, position.totalInvestment);
     if (!sellResult.success) {
       this.logger.error(`❌ Paper sell failed for pool ${position.poolId}: ${sellResult.error}`);
       return;
@@ -1133,6 +1515,11 @@ export class EarlyTradingStrategyService implements OnModuleInit, OnModuleDestro
         timestamp: Date.now()
       });
     }
+
+    // NEW: Start post-exit monitoring for runner detection
+    if (this.config.postExitMonitoring.enabled) {
+      this.startPostExitMonitoring(position.poolId, currentPrice, reason, totalPnLPercent);
+    }
   }
   
   private trackSuccessfulExit(poolId: string, exitPrice: number, exitReason: string, pnlPercent: number) {
@@ -1167,8 +1554,6 @@ export class EarlyTradingStrategyService implements OnModuleInit, OnModuleDestro
     // Log if pool is eligible for re-entry
     if (tracker.reEntryCount < tracker.maxReEntries) {
       this.logger.log(`   🔄 Pool eligible for re-entry (${tracker.maxReEntries - tracker.reEntryCount} remaining)`);
-    } else {
-      this.logger.log(`   🚫 Pool has reached maximum re-entries`);
     }
   }
 
@@ -1263,7 +1648,12 @@ export class EarlyTradingStrategyService implements OnModuleInit, OnModuleDestro
 
   // Public methods for status and configuration
   public getActivePositions(): EarlyPosition[] {
-    return Array.from(this.activePositions.values());
+    return Array.from(this.activePositions.values()).filter(pos => pos.status === 'entered');
+  }
+
+  public hasActivePosition(poolId: string): boolean {
+    const position = this.activePositions.get(poolId);
+    return position !== undefined && position.status === 'entered';
   }
 
   public getDailyStats() {
@@ -1348,6 +1738,85 @@ export class EarlyTradingStrategyService implements OnModuleInit, OnModuleDestro
       this.logger.log(`✅ Position monitoring re-initialized for ${activePositionsCount + paperPositionsCount} positions`);
     } else {
       this.logger.log('ℹ️ No existing positions found - starting fresh');
+    }
+  }
+
+  public isRugRecoveryEnabled(): boolean {
+    return this.config.rugRecovery.enabled;
+  }
+
+  // NEW: Check exit conditions for runner positions
+  private checkRunnerExitConditions(position: RunnerPosition) {
+    const timeSinceEntry = Date.now() - position.entryTime;
+    const priceChangePercent = position.pnlPercent;
+    
+    // Check take profit (25% for runners)
+    if (priceChangePercent >= 25) {
+      this.executeRunnerExit(position, 'take_profit', `25% profit target reached for runner position`);
+      return;
+    }
+    
+    // Check stop loss (8% for runners)
+    if (priceChangePercent <= -8) {
+      this.executeRunnerExit(position, 'stop_loss', `8% stop loss triggered for runner position`);
+      return;
+    }
+    
+    // Check max hold time (30 minutes for runners)
+    if (timeSinceEntry >= 30 * 60 * 1000) {
+      this.executeRunnerExit(position, 'timeout', `Max hold time of 30 minutes exceeded for runner position`);
+      return;
+    }
+    
+    // Check momentum loss (if momentum score drops significantly)
+    if (position.momentumScore < 0.3 && timeSinceEntry > 5 * 60 * 1000) {
+      this.executeRunnerExit(position, 'momentum_loss', `Momentum lost for runner position`);
+      return;
+    }
+  }
+
+  // NEW: Execute runner position exit
+  private executeRunnerExit(position: RunnerPosition, reason: string, message: string) {
+    const exitPrice = position.currentPrice;
+    const pnl = position.pnl;
+    const pnlPercent = position.pnlPercent;
+    
+    // Execute paper sell
+    const sellResult = this.executePaperSell(position.poolId, exitPrice, position.investment);
+    
+    if (sellResult.success) {
+      this.logger.log(`🚀 RUNNER EXIT: Pool ${position.poolId} - ${reason}`);
+      this.logger.log(`   Entry: ${position.entryPrice.toFixed(8)} SOL`);
+      this.logger.log(`   Exit: ${exitPrice.toFixed(8)} SOL`);
+      this.logger.log(`   PnL: ${pnl.toFixed(4)} SOL (${pnlPercent.toFixed(2)}%)`);
+      this.logger.log(`   Investment: ${position.investment.toFixed(2)} SOL`);
+      this.logger.log(`   Momentum Score: ${position.momentumScore.toFixed(2)}`);
+      this.logger.log(`   Consecutive Growth: ${position.consecutiveGrowth}`);
+      this.logger.log(`   Message: ${message}`);
+      
+      // Update daily stats
+      this.dailyStats.totalTrades++;
+      if (pnl > 0) {
+        this.dailyStats.successfulTrades++;
+      } else {
+        this.dailyStats.failedTrades++;
+        this.dailyStats.dailyLoss += Math.abs(pnl);
+      }
+      this.dailyStats.totalPnL += pnl;
+      
+      // Remove from active positions
+      this.runnerPositions.delete(position.id);
+      
+      // Check if we should continue post-exit monitoring
+      const tracker = this.postExitTrackers.get(position.poolId);
+      if (tracker && tracker.runnerDetectionAttempts < tracker.maxRunnerAttempts) {
+        this.logger.log(`🎯 Continuing runner detection for pool ${position.poolId} (${tracker.runnerDetectionAttempts}/${tracker.maxRunnerAttempts} attempts)`);
+      } else {
+        this.logger.log(`⏰ Stopping runner detection for pool ${position.poolId} - max attempts reached`);
+        this.postExitTrackers.delete(position.poolId);
+      }
+    } else {
+      this.logger.error(`❌ Failed to execute runner exit for pool ${position.poolId}: ${sellResult.error}`);
     }
   }
 

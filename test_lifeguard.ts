@@ -1,5 +1,6 @@
 import { LifeguardService } from './src/lifeguard/lifeguard.service';
 import { PositionManagerService } from './src/position-manager/position-manager.service';
+import { EarlyTradingStrategyService } from './src/position-manager/early-trading-strategy.service';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 
 async function testLifeguardService() {
@@ -14,8 +15,13 @@ async function testLifeguardService() {
     await positionManagerService.onModuleInit();
     console.log('✅ Position Manager service initialized');
     
+    // Create the Early Trading Strategy service
+    const earlyTradingService = new EarlyTradingStrategyService(positionManagerService, eventEmitter);
+    await earlyTradingService.onModuleInit();
+    console.log('✅ Early Trading Strategy service initialized');
+    
     // Create the Lifeguard service
-    const lifeguard = new LifeguardService(eventEmitter, positionManagerService);
+    const lifeguard = new LifeguardService(eventEmitter, positionManagerService, earlyTradingService);
     console.log('✅ Lifeguard service created');
     
     // Initialize the service
