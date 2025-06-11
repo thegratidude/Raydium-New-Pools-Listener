@@ -2,6 +2,10 @@ import { Module } from '@nestjs/common';
 import { EventEmitterModule } from '@nestjs/event-emitter';
 import { PositionManagerService } from './position-manager.service';
 import { PositionManagerDB } from './database/position-manager-db';
+import { TradingService } from './trading.service';
+import { TradingController } from './trading.controller';
+import { ArbitrageDetectorService } from './arbitrage-detector.service';
+import { EarlyTradingStrategyService } from './early-trading-strategy.service';
 
 @Module({
   imports: [
@@ -16,7 +20,14 @@ import { PositionManagerDB } from './database/position-manager-db';
       ignoreErrors: false,
     }),
   ],
-  providers: [PositionManagerService, PositionManagerDB],
-  exports: [PositionManagerService, PositionManagerDB],
+  controllers: [TradingController],
+  providers: [
+    PositionManagerService,
+    PositionManagerDB,
+    TradingService,
+    ArbitrageDetectorService,
+    EarlyTradingStrategyService,
+  ],
+  exports: [PositionManagerService, PositionManagerDB, TradingService, ArbitrageDetectorService, EarlyTradingStrategyService],
 })
 export class PositionManagerModule {} 

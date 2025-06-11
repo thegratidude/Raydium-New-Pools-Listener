@@ -31,9 +31,6 @@ interface PoolMonitor {
   consecutiveErrors: number; // Track errors for backoff
   lastPrice: number; // Track last price to detect changes
   lastTVL: number; // Track last TVL to detect changes
-  ratioWarningLogged: boolean; // Track if ratio warning has been logged
-  ratioGraceStart?: number; // Track when suspicious ratio was first detected
-  ratioGraceRetries?: number; // Track number of retries for suspicious ratio
   decimals_a: number; // Base token decimals
   decimals_b: number; // Quote token decimals
 }
@@ -76,16 +73,6 @@ export class LifeguardService implements OnModuleInit {
     batchSize: 3, // Process pools in batches
     backoffMultiplier: 1.5,
     maxBackoffMs: 30000 // Max 30 second backoff
-  };
-
-  // Ratio-based suspicious pool detection
-  private readonly SUSPICIOUS_RATIOS = {
-    EXTREMELY_LOW: 0.001,    // < 0.001 = fake liquidity (1 token : 1000 SOL)
-    EXTREMELY_HIGH: 1000,    // > 1000 = diluted token (1000 tokens : 1 SOL)
-    WARNING_LOW: 0.01,       // < 0.01 = suspicious
-    WARNING_HIGH: 100,       // > 100 = suspicious
-    CRITICAL_LOW: 0.0001,    // < 0.0001 = extremely suspicious
-    CRITICAL_HIGH: 10000     // > 10000 = extremely suspicious
   };
 
   private requestQueue: Array<() => Promise<void>> = [];
@@ -295,7 +282,6 @@ export class LifeguardService implements OnModuleInit {
         timeoutId: setTimeout(() => this.stopMonitoring(pool.pool_id), remainingTime),
         lastPrice: baselineMetrics.priceInSOL,
         lastTVL: baselineMetrics.tvl,
-        ratioWarningLogged: false,
         decimals_a: pool.decimals_a,
         decimals_b: pool.decimals_b
       };
@@ -446,52 +432,22 @@ export class LifeguardService implements OnModuleInit {
 
         // 🚨 NEW: Early rug detection - stop monitoring if TVL drops more than 30% below baseline
         if (tvlChangePercent <= -30) {
-          this.logger.warn(`💀 RUG DETECTED! Pool ${poolId} TVL dropped ${tvlChangePercent.toFixed(2)}% below baseline. Stopping monitoring.`);
+          this.logger.warn(`💀 RUG DETECTED! Pool ${poolId} TVL dropped ${tvlChangePercent.toFixed(2)}% below baseline.`);
+          this.logger.warn(`📊 TVL Details: Baseline: ${baselineTVLSOL.toFixed(2)} SOL → Current: ${tvlSOL.toFixed(2)} SOL (${tvlSOL - baselineTVLSOL >= 0 ? '+' : ''}${(tvlSOL - baselineTVLSOL).toFixed(2)} SOL change)`);
+          this.logger.warn(`💰 Price: ${currentMetrics.priceInSOL.toFixed(8)} SOL (${priceChangePercent >= 0 ? '+' : ''}${priceChangePercent.toFixed(2)}%) | Base/Quote: ${(currentMetrics.baseReserve / currentMetrics.quoteReserve).toFixed(6)}`);
           this.stopMonitoring(poolId, 'dead');
+          await this.logTVLHistory(poolId, tvlSOL, baselineTVLSOL, tvlChangePercent);
           return; // Exit early, no more updates
         }
 
-        // 🚨 NEW: Suspicious ratio grace period logic
-        const currentRatio = currentMetrics.reserveRatio;
-        let ratioAlert = '';
-        const now = Date.now();
-        const isCriticalRatio =
-          currentRatio <= this.SUSPICIOUS_RATIOS.CRITICAL_LOW ||
-          currentRatio >= this.SUSPICIOUS_RATIOS.CRITICAL_HIGH ||
-          currentRatio <= this.SUSPICIOUS_RATIOS.EXTREMELY_LOW ||
-          currentRatio >= this.SUSPICIOUS_RATIOS.EXTREMELY_HIGH;
-
-        if (isCriticalRatio) {
-          if (!monitor.ratioGraceStart) {
-            // First time detecting suspicious ratio
-            monitor.ratioGraceStart = now;
-            monitor.ratioGraceRetries = 0;
-            this.logger.warn(`⏳ Suspicious ratio detected for pool ${poolId} (${currentRatio.toFixed(6)}). Starting 60s grace period...`);
-          } else {
-            const timeSinceStart = now - monitor.ratioGraceStart;
-            const sixtySeconds = 60 * 1000;
-            
-            // Check if 60 seconds have passed - kill the pool
-            if (timeSinceStart >= sixtySeconds) {
-              this.logger.warn(`🚨 CRITICAL SUSPICIOUS RATIO! Pool ${poolId} ratio: ${currentRatio.toFixed(6)}. Killing monitoring after 60s grace period.`);
-              this.stopMonitoring(poolId, 'dead');
-              return;
-            }
-            // If less than 60 seconds have passed, silently continue monitoring
-          }
-        } else {
-          // Ratio returned to normal - log success and reset grace period
-          if (monitor.ratioGraceStart) {
-            const timeSinceStart = now - monitor.ratioGraceStart;
-            this.logger.log(`✅ Pool ${poolId} ratio normalized after ${Math.round(timeSinceStart / 1000)}s grace period. Continuing monitoring.`);
-          }
-          // Reset grace period
-          monitor.ratioGraceStart = undefined;
-          monitor.ratioGraceRetries = undefined;
-        }
-
-        if (ratioAlert && monitor.ratioWarningLogged) {
-          this.logger.warn(ratioAlert);
+        // 🚨 NEW: Kill pools with low TVL (< 50 SOL)
+        if (tvlSOL < 50) {
+          this.logger.warn(`💀 LOW TVL DETECTED! Pool ${poolId} TVL is ${tvlSOL.toFixed(2)} SOL (below 50 SOL threshold).`);
+          this.logger.warn(`📊 TVL Details: Baseline: ${baselineTVLSOL.toFixed(2)} SOL → Current: ${tvlSOL.toFixed(2)} SOL (${tvlSOL - baselineTVLSOL >= 0 ? '+' : ''}${(tvlSOL - baselineTVLSOL).toFixed(2)} SOL change)`);
+          this.logger.warn(`💰 Price: ${currentMetrics.priceInSOL.toFixed(8)} SOL (${priceChangePercent >= 0 ? '+' : ''}${priceChangePercent.toFixed(2)}%) | Base/Quote: ${(currentMetrics.baseReserve / currentMetrics.quoteReserve).toFixed(6)}`);
+          this.stopMonitoring(poolId, 'dead');
+          await this.logTVLHistory(poolId, tvlSOL, baselineTVLSOL, tvlChangePercent);
+          return; // Exit early, no more updates
         }
 
         // Check if there's a significant change since last update (0.1% threshold)
@@ -510,8 +466,11 @@ export class LifeguardService implements OnModuleInit {
           const tvlColor = tvlChangePercent >= -5 ? '🟢' : '🔴';
           const priorityIcon = monitor.priority === 'high' ? '🔥' : monitor.priority === 'medium' ? '⚡' : '💤';
           
-          // New format: Price in SOL with percentage change, TVL in SOL
-          console.log(`${priorityIcon} ${priceColor} ${poolId.slice(0, 8)} | Price: ${currentMetrics.priceInSOL.toFixed(8)} SOL (${priceChangePercent >= 0 ? '+' : ''}${priceChangePercent.toFixed(2)}%) | ${tvlColor} TVL: ${tvlSOL.toFixed(2)} SOL | Ratio: ${currentMetrics.reserveRatio.toFixed(6)}`);
+          // Enhanced format: Show TVL change in SOL units as well as percentage
+          const tvlChangeSOL = tvlSOL - baselineTVLSOL;
+          const tvlChangeSymbol = tvlChangeSOL >= 0 ? '+' : '';
+          
+          console.log(`${priorityIcon} ${priceColor} ${poolId.slice(0, 8)} | Price: ${currentMetrics.priceInSOL.toFixed(8)} SOL (${priceChangePercent >= 0 ? '+' : ''}${priceChangePercent.toFixed(2)}%) | ${tvlColor} TVL: ${tvlSOL.toFixed(2)} SOL (${tvlChangeSymbol}${tvlChangeSOL.toFixed(2)} SOL, ${tvlChangePercent >= 0 ? '+' : ''}${tvlChangePercent.toFixed(2)}%) | Base/Quote: ${(currentMetrics.baseReserve / currentMetrics.quoteReserve).toFixed(6)}`);
         }
 
         // Update last values for next comparison
@@ -530,9 +489,24 @@ export class LifeguardService implements OnModuleInit {
           timestamp: Date.now()
         });
 
+        // Emit pool metrics update for arbitrage detection
+        this.eventEmitter.emit('pool_metrics_update', {
+          poolId,
+          currentPrice: currentMetrics.priceInSOL,
+          baselinePrice: monitor.baselinePrice,
+          currentTVL: tvlSOL,
+          baselineTVL: baselineTVLSOL,
+          reserveRatio: currentMetrics.reserveRatio,
+          priceChangePercent,
+          tvlChangePercent,
+          timestamp: Date.now()
+        });
+
         // Check for extreme conditions
         if (tvlChangePercent < -20) {
-          this.logger.warn(`🚨 RUG DETECTED! Pool ${poolId} TVL dropped ${tvlChangePercent.toFixed(2)}%`);
+          const tvlChangeSOL = tvlSOL - baselineTVLSOL;
+          this.logger.warn(`🚨 RUG DETECTED! Pool ${poolId} TVL dropped ${tvlChangePercent.toFixed(2)}% (${tvlChangeSOL.toFixed(2)} SOL)`);
+          this.logger.warn(`📊 TVL Breakdown: Baseline: ${baselineTVLSOL.toFixed(2)} SOL → Current: ${tvlSOL.toFixed(2)} SOL`);
         }
 
         // Adjust update interval based on activity
@@ -641,8 +615,8 @@ export class LifeguardService implements OnModuleInit {
       const baseBalance = baseData.amount / Math.pow(10, baseDecimals);
       const quoteBalance = quoteData.amount / Math.pow(10, quoteDecimals);
 
-      // Reserve ratio: how many base tokens per quote token (baseReserve / quoteReserve)
-      const reserveRatio = baseBalance / quoteBalance;
+      // FIXED: Reserve ratio should be quoteReserve / baseReserve (same as price)
+      const reserveRatio = quoteBalance / baseBalance;
       
       // Price in SOL: how much SOL per base token (quoteReserve / baseReserve)
       const priceInSOL = quoteBalance / baseBalance;
@@ -716,7 +690,7 @@ export class LifeguardService implements OnModuleInit {
       const snapshot: PoolSnapshot = {
         pool_id: poolId,
         timestamp: metrics.timestamp,
-        price: metrics.reserveRatio,
+        price: metrics.priceInSOL, // FIXED: Use priceInSOL instead of reserveRatio
         base_reserve: metrics.baseReserve,
         quote_reserve: metrics.quoteReserve,
         volume_24h: metrics.tvl // Using TVL as volume for now
@@ -746,7 +720,7 @@ export class LifeguardService implements OnModuleInit {
     // Different logging based on reason
     switch (reason) {
       case 'dead':
-        this.logger.log(`💀 Stopped monitoring dead pool ${poolId} (TVL dropped below -90%)`);
+        this.logger.log(`💀 Stopped monitoring dead pool ${poolId} (TVL dropped below threshold)`);
         break;
       case 'manual':
         this.logger.log(`🛑 Manually stopped monitoring pool ${poolId}`);
@@ -1006,4 +980,20 @@ export class LifeguardService implements OnModuleInit {
     this.logger.warn(`❌ Failed to establish baseline for pool ${pool.pool_id} after ${attempt} attempts over ${Math.round((Date.now() - startTime) / 1000 / 60)}m`);
     return null;
   }
-} 
+
+  private async logTVLHistory(poolId: string, currentTVL: number, baselineTVL: number, tvlChangePercent: number) {
+    const monitor = this.monitoredPools.get(poolId);
+    if (!monitor) return;
+
+    const tvlChangeSOL = currentTVL - baselineTVL;
+    const monitoringDuration = Math.round((Date.now() - monitor.startTime) / 1000 / 60); // minutes
+
+    this.logger.warn(`📈 TVL History for Pool ${poolId}:`);
+    this.logger.warn(`   ⏰ Monitoring Duration: ${monitoringDuration} minutes`);
+    this.logger.warn(`   📊 Baseline TVL: ${baselineTVL.toFixed(2)} SOL`);
+    this.logger.warn(`   📊 Current TVL: ${currentTVL.toFixed(2)} SOL`);
+    this.logger.warn(`   📉 TVL Change: ${tvlChangeSOL >= 0 ? '+' : ''}${tvlChangeSOL.toFixed(2)} SOL (${tvlChangePercent >= 0 ? '+' : ''}${tvlChangePercent.toFixed(2)}%)`);
+    this.logger.warn(`   🚨 Rug Detection Threshold: -30% (${(baselineTVL * 0.7).toFixed(2)} SOL)`);
+    this.logger.warn(`   🚨 Low TVL Threshold: 50 SOL`);
+  }
+}

@@ -1,6 +1,6 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { Server } from 'socket.io';
-import { SocketService } from './socket.service';
+import { PoolGateway } from './pool.gateway';
 import * as express from 'express';
 
 const HEALTH_CHECK_INTERVAL_MS = 10000; // 10 seconds
@@ -23,7 +23,7 @@ export class GatewayService implements OnModuleInit, OnModuleDestroy {
   private totalMessagesSinceLastCheck: number = 0;
   private raydiumMessagesSinceLastCheck: number = 0;
 
-  constructor(private socketService: SocketService) {}
+  constructor(private poolGateway: PoolGateway) {}
 
   setExpressApp(app: express.Application) {
     this.expressApp = app;
@@ -44,7 +44,7 @@ export class GatewayService implements OnModuleInit, OnModuleDestroy {
         status: 'healthy',
         uptime: `${hours}h ${minutes}m ${seconds}s`,
         timestamp: new Date().toISOString(),
-        socketServiceReady: this.socketService.isReady(),
+        socketServiceReady: this.poolGateway.isReady(),
         gatewayServiceReady: this.isInitialized
       });
     });
@@ -68,7 +68,7 @@ export class GatewayService implements OnModuleInit, OnModuleDestroy {
           formatted: `${hours}h ${minutes}m ${seconds}s`
         },
         services: {
-          socketService: this.socketService.isReady() ? 'ready' : 'not ready',
+          socketService: this.poolGateway.isReady() ? 'ready' : 'not ready',
           gatewayService: this.isInitialized ? 'ready' : 'not ready'
         },
         monitoring: {
@@ -107,7 +107,7 @@ export class GatewayService implements OnModuleInit, OnModuleDestroy {
     const startTime = Date.now();
     
     const poll = () => {
-      if (this.socketService.isReady() && this.socketService.server) {
+      if (this.poolGateway.isReady() && this.poolGateway.server) {
         this.logger.log('✅ Socket.IO server successfully initialized');
         this.isInitialized = true;
         this.startHealthChecks();
@@ -170,7 +170,7 @@ export class GatewayService implements OnModuleInit, OnModuleDestroy {
 
     this.logger.log(`📢 Broadcasting new pool: ${poolId}`);
     this.trackMessage('new_pool');
-    this.socketService.server.emit('new_pool', message);
+    this.poolGateway.server.emit('new_pool', message);
   }
 
   broadcastHealth(uptime: number) {
@@ -194,7 +194,7 @@ export class GatewayService implements OnModuleInit, OnModuleDestroy {
     // Removed log statement to reduce noise - health messages are still being broadcast
     
     // Emit to the default namespace where the Python client is connecting
-    this.socketService.server.emit('health', message);
+    this.poolGateway.server.emit('health', message);
     
     // Reset counters for next check
     this.lastHealthCheck = now;
@@ -217,7 +217,7 @@ export class GatewayService implements OnModuleInit, OnModuleDestroy {
     this.logger.log(`⏱️  Server uptime: ${hours}h ${minutes}m ${seconds}s`);
     this.logger.log(`📨 Raydium messages received: ${this.raydiumMessagesSinceLastCheck} (last ${Math.round(timeSinceLastCheck/1000)}s)`);
     this.logger.log(`📊 Raydium messages per minute: ${Math.round(raydiumMessagesPerMinute)}`);
-    this.logger.log(`🔗 Socket service ready: ${this.socketService.isReady()}`);
+    this.logger.log(`🔗 Socket service ready: ${this.poolGateway.isReady()}`);
     this.logger.log('═══════════════════════════════════════════════════════════════════════════════════\n');
 
     // Reset counter for next check

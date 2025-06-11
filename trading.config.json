@@ -1,0 +1,119 @@
+{
+  "trading": {
+    "enabled": true,
+    "mode": "paper",
+    "maxPositions": 5,
+    "positionSize": 0.05,
+    "maxSlippage": 5,
+    "stopLoss": 10,
+    "takeProfit": 20,
+    "maxDailyLoss": 0.5,
+    "minLiquidity": 1.0,
+    "maxPriceImpact": 3
+  },
+  "riskManagement": {
+    "maxRiskPerTrade": 0.02,
+    "maxPortfolioRisk": 0.1,
+    "correlationLimit": 0.7,
+    "volatilityThreshold": 0.5,
+    "liquidityThreshold": 1.0,
+    "ageThreshold": 3600
+  },
+  "strategies": {
+    "momentum": {
+      "enabled": true,
+      "weight": 0.4,
+      "parameters": {
+        "lookbackPeriod": 300,
+        "momentumThreshold": 0.05,
+        "volumeThreshold": 0.1
+      }
+    },
+    "liquidity": {
+      "enabled": true,
+      "weight": 0.3,
+      "parameters": {
+        "minLiquidity": 2.0,
+        "liquidityGrowthThreshold": 0.1,
+        "depthThreshold": 0.5
+      }
+    },
+    "volatility": {
+      "enabled": true,
+      "weight": 0.3,
+      "parameters": {
+        "maxVolatility": 0.8,
+        "minVolatility": 0.1,
+        "volatilityWindow": 600
+      }
+    }
+  },
+  "execution": {
+    "paperTrading": {
+      "enabled": true,
+      "successRate": 0.9,
+      "delay": 1000
+    },
+    "liveTrading": {
+      "enabled": false,
+      "maxRetries": 3,
+      "retryDelay": 2000,
+      "timeout": 30000
+    },
+    "slippage": {
+      "default": 5,
+      "aggressive": 10,
+      "conservative": 2
+    }
+  },
+  "monitoring": {
+    "positionMonitoring": {
+      "interval": 30000,
+      "maxDuration": 3600000,
+      "alertThreshold": 0.15
+    },
+    "riskMonitoring": {
+      "interval": 60000,
+      "maxDrawdown": 0.2,
+      "varLimit": 0.05
+    },
+    "performanceMonitoring": {
+      "interval": 300000,
+      "metrics": ["sharpe", "sortino", "maxDrawdown", "winRate"]
+    }
+  },
+  "alerts": {
+    "enabled": true,
+    "channels": {
+      "console": true,
+      "websocket": true,
+      "file": true
+    },
+    "events": {
+      "positionOpened": true,
+      "positionClosed": true,
+      "stopLoss": true,
+      "takeProfit": true,
+      "dailyLossLimit": true,
+      "error": true
+    }
+  },
+  "backtesting": {
+    "enabled": false,
+    "startDate": "2024-01-01",
+    "endDate": "2024-12-31",
+    "initialCapital": 10.0,
+    "commission": 0.0025,
+    "slippage": 0.001
+  },
+  "optimization": {
+    "enabled": false,
+    "parameters": {
+      "positionSize": [0.01, 0.05, 0.1],
+      "stopLoss": [5, 10, 15],
+      "takeProfit": [15, 20, 25],
+      "maxPositions": [3, 5, 7]
+    },
+    "metrics": ["sharpe", "totalReturn", "maxDrawdown"]
+  }
+} 

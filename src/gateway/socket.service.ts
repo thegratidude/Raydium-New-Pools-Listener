@@ -50,12 +50,12 @@ export class SocketService implements OnModuleDestroy {
         this.logger.warn(`Could not clear port ${this.PORT}: ${error.message}`);
       }
 
-      // Create HTTP server
-      this.logger.log('Creating HTTP server...');
+      // Create HTTP server from Express app
+      this.logger.log('Creating HTTP server from Express app...');
       this.httpServer = createServer(this.expressApp);
       
-      // Create Socket.IO server with enhanced configuration
-      this.logger.log('Creating Socket.IO server...');
+      // Create Socket.IO server attached to the HTTP server
+      this.logger.log('Creating Socket.IO server attached to HTTP server...');
       this.server = new Server(this.httpServer, {
         cors: {
           origin: '*',
@@ -80,6 +80,9 @@ export class SocketService implements OnModuleDestroy {
         this.logger.log(`Client transport: ${socket.conn.transport.name}`);
         this.logger.log(`Client remote address: ${socket.conn.remoteAddress}`);
         
+        // Add to clients set
+        this.clients.add(socket);
+        
         // Log WebSocket connection event
         this.fileLogger.logWebSocketEvent('client_connected', {
           client_id: socket.id,
@@ -90,6 +93,9 @@ export class SocketService implements OnModuleDestroy {
         
         socket.on('disconnect', (reason) => {
           this.logger.log(`❌ Client disconnected - ID: ${socket.id}, reason: ${reason}`);
+          
+          // Remove from clients set
+          this.clients.delete(socket);
           
           // Log WebSocket disconnection event
           this.fileLogger.logWebSocketEvent('client_disconnected', {
@@ -111,41 +117,15 @@ export class SocketService implements OnModuleDestroy {
         });
       });
 
-      // Start the server
-      this.logger.log(`Starting server on port ${this.PORT}...`);
-      await new Promise<void>((resolve, reject) => {
-        this.httpServer.listen(this.PORT, () => {
-          this.logger.log(`✅ Socket.IO server running on port ${this.PORT}`);
-          this.logger.log(`Server address: http://localhost:${this.PORT}`);
-          this.isInitialized = true;
-          this.isServerReady = true;
-          this.startHealthChecks();
-          resolve();
-        });
-
-        this.httpServer.on('error', (error: NodeJS.ErrnoException) => {
-          this.logger.error(`❌ HTTP server error: ${error.message}`);
-          this.logger.error(`Error code: ${error.code}`);
-          this.logger.error(`Error stack: ${error.stack}`);
-          
-          if (error.code === 'EADDRINUSE') {
-            this.logger.error(`Port ${this.PORT} is already in use. Attempting to recover...`);
-            try {
-              execSync(`lsof -ti:${this.PORT} | xargs kill -9 2>/dev/null || true`);
-              this.logger.log(`Cleared port ${this.PORT}, retrying...`);
-              this.httpServer.listen(this.PORT);
-            } catch (retryError) {
-              this.logger.error(`Failed to recover: ${retryError.message}`);
-              reject(retryError);
-            }
-          } else {
-            this.logger.error(`Server error: ${error.message}`);
-            reject(error);
-          }
-        });
-      });
+      // Mark as ready
+      this.isInitialized = true;
+      this.isServerReady = true;
+      this.startHealthChecks();
 
       this.logger.log('✅ SocketService initialization completed successfully');
+      this.logger.log(`✅ Socket.IO server ready on port ${this.PORT}`);
+      this.logger.log(`Server address: http://localhost:${this.PORT}`);
+      
     } catch (error) {
       this.logger.error(`❌ SocketService initialization failed: ${error.message}`);
       this.logger.error(`Error stack: ${error.stack}`);

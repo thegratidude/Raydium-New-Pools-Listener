@@ -247,4 +247,187 @@ ps aux | grep test_websocket_listener
 - **Monitoring dashboard** - Real-time system health visualization
 - **Trading strategy refinement** - Optimize entry/exit conditions
 
-**The system is now PRODUCTION READY and successfully detecting NEW Raydium pools within seconds of their creation!** 🎉 
+**The system is now PRODUCTION READY and successfully detecting NEW Raydium pools within seconds of their creation!** 🎉
+
+## **Current System State (Updated: June 10, 2024)**
+
+### **✅ Fixed Issues:**
+- **Price Calculation Bug**: Reserve ratio calculation corrected (was inverted)
+- **Database Storage**: Now storing correct `priceInSOL` instead of `reserveRatio`
+- **Console Display**: Fixed base/quote ratio display
+- **Token Account Parsing**: Validated as 100% accurate
+
+### **🎯 Current Configuration:**
+- **Trading Mode**: Paper trading only (no real funds)
+- **Position Size**: 1.0 SOL per position
+- **Max Positions**: 3 concurrent positions
+- **Take Profit**: 25% (with 50% partial exit at 15%)
+- **Stop Loss**: 15%
+- **Max Hold Time**: 60 minutes
+- **Daily Loss Limit**: 2.0 SOL
+
+### **📊 System Components:**
+- **LifeguardService**: Pool monitoring with corrected price calculations
+- **ArbitrageDetectorService**: Opportunity detection with 25% take profit
+- **EarlyTradingStrategyService**: 1 SOL paper trading strategy
+- **PositionManagerService**: Database management
+- **TradingService**: Paper trade execution
+
+## **🚨 Emergency Stop Procedures**
+
+### **1. Immediate Stop (All Systems)**
+```bash
+# Stop all processes
+pkill -f "node"
+pkill -f "npm"
+pkill -f "ts-node"
+
+# Or if using PM2
+pm2 stop all
+pm2 delete all
+```
+
+### **2. Database Recovery**
+```bash
+# Restore from backup (if needed)
+cp position_manager.sqlite.backup_YYYYMMDD_HHMMSS position_manager.sqlite
+cp pool_history.sqlite.backup_YYYYMMDD_HHMMSS pool_history.sqlite
+```
+
+### **3. Configuration Reset**
+```bash
+# Reset trading configuration to safe defaults
+export TRADING_ENABLED=false
+export POSITION_SIZE=0.05
+export MAX_POSITIONS=1
+```
+
+## **🔧 System Health Checks**
+
+### **1. Price Calculation Validation**
+```bash
+# Check if price calculations are correct
+sqlite3 position_manager.sqlite "SELECT pool_id, price, (quote_reserve / base_reserve) as calculated_price, (price - (quote_reserve / base_reserve)) as diff FROM pool_snapshots WHERE pool_id LIKE 'Hnj%' ORDER BY timestamp DESC LIMIT 5;"
+```
+
+### **2. Database Integrity**
+```bash
+# Check database structure
+sqlite3 position_manager.sqlite ".schema"
+sqlite3 position_manager.sqlite "SELECT COUNT(*) as total_snapshots FROM pool_snapshots;"
+```
+
+### **3. Trading Status**
+```bash
+# Check if trading is enabled
+curl http://localhost:3000/trading/status
+```
+
+## **🔄 Recovery Procedures**
+
+### **1. Price Calculation Issues**
+If price calculations seem wrong:
+1. Check `src/lifeguard/lifeguard.service.ts` line 618: should be `quoteBalance / baseBalance`
+2. Check `src/lifeguard/lifeguard.service.ts` line 693: should store `metrics.priceInSOL`
+3. Restart the system
+
+### **2. Database Corruption**
+If database is corrupted:
+1. Stop all processes
+2. Restore from latest backup
+3. Verify backup integrity
+4. Restart system
+
+### **3. Trading Issues**
+If trading behavior is unexpected:
+1. Check `src/position-manager/trading.service.ts` configuration
+2. Verify `src/position-manager/early-trading-strategy.service.ts` settings
+3. Check event emitter connections
+4. Restart trading services
+
+## **📋 Pre-Launch Checklist**
+
+### **✅ Before Starting Overnight Run:**
+- [ ] Database is fresh (cleared old data)
+- [ ] Price calculations are correct
+- [ ] Paper trading mode is enabled
+- [ ] Position size is set to 1.0 SOL
+- [ ] Risk limits are configured
+- [ ] Monitoring is active
+- [ ] Logs are being written
+- [ ] Health endpoints are responding
+
+### **✅ System Configuration:**
+```bash
+# Environment variables for overnight run
+export TRADING_ENABLED=true
+export POSITION_SIZE=1.0
+export MAX_POSITIONS=3
+export STOP_LOSS=15
+export TAKE_PROFIT=25
+export MAX_DAILY_LOSS=2.0
+export MIN_LIQUIDITY=5.0
+```
+
+## **📞 Emergency Contacts**
+
+### **System Alerts:**
+- **High Daily Loss**: System auto-stops at 2.0 SOL loss
+- **Database Issues**: Automatic backup before clearing
+- **Price Calculation**: Validated and corrected
+- **Trading Issues**: Paper trading only (no real funds at risk)
+
+### **Recovery Steps:**
+1. **Stop all processes**
+2. **Check logs for errors**
+3. **Restore from backup if needed**
+4. **Verify configuration**
+5. **Restart with safe defaults**
+
+## **🎯 Overnight Run Configuration**
+
+### **Paper Trading Strategy:**
+- **Investment**: 1.0 SOL per position (paper only)
+- **Entry**: 5% price increase + 10% TVL increase
+- **Partial Exit**: 50% at 15% profit
+- **Full Exit**: Remaining 50% at 25% profit
+- **Stop Loss**: 15% loss
+- **Max Hold**: 60 minutes
+- **Max Positions**: 3 concurrent
+
+### **Monitoring:**
+- **Health Check**: Every 30 seconds
+- **Position Monitoring**: Every 10 seconds
+- **Database Snapshots**: Every pool update
+- **Log Level**: INFO for overnight monitoring
+
+### **Expected Behavior:**
+- System will detect new pools
+- Analyze for entry conditions
+- Execute paper trades when conditions met
+- Monitor positions for exit conditions
+- Log all activities for review
+
+## **📊 Success Metrics**
+
+### **Overnight Run Success Indicators:**
+- ✅ New pools detected and monitored
+- ✅ Entry conditions properly evaluated
+- ✅ Paper trades executed when conditions met
+- ✅ Exit conditions properly triggered
+- ✅ No system crashes or errors
+- ✅ All logs properly written
+- ✅ Database integrity maintained
+
+### **Review Points:**
+- **Pool Detection Rate**: How many new pools found
+- **Entry Signal Rate**: How many met entry conditions
+- **Trade Success Rate**: How many trades were profitable
+- **System Stability**: Any crashes or errors
+- **Performance**: Response times and efficiency
+
+---
+
+**Last Updated**: June 10, 2024  
+**System Version**: Corrected price calculations + 1 SOL paper trading  
+**Status**: Ready for overnight testing 

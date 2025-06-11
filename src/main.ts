@@ -56,10 +56,9 @@ async function bootstrap() {
   const fileLogger = new FileLoggerService();
   
   const logger = new Logger('Bootstrap');
-  const expressApp = express();
   
   const app = await NestFactory.create(AppModule, {
-    // Disable the built-in HTTP server since we're using our own
+    // Use the built-in HTTP server but we'll configure it properly
     bodyParser: true,
     cors: true,
     logger: fileLogger, // Use our custom file logger
@@ -80,6 +79,9 @@ async function bootstrap() {
 
   // Initialize the application and wait for all modules to be ready
   await app.init();
+  
+  // Get the underlying Express app from NestJS
+  const expressApp = app.getHttpAdapter().getInstance();
   
   // Get the SocketService and set the Express app AFTER app.init()
   const socketService = app.get(SocketService);
@@ -132,12 +134,10 @@ async function bootstrap() {
     process.exit(0);
   });
 
-  // Keep the application running without starting the built-in HTTP server
-  // The SocketService handles its own HTTP server on port 5001
-  await new Promise(() => {
-    // Keep the process alive indefinitely
-    // The SocketService HTTP server is already running
-  });
+  // Start the NestJS HTTP server on port 5001
+  // This will include all the NestJS controllers (including TradingController)
+  await app.listen(5001);
+  logger.log('🚀 NestJS HTTP server started on port 5001');
 }
 
 bootstrap();
