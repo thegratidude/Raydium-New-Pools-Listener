@@ -5,6 +5,7 @@ import sys
 from datetime import datetime
 import socketio
 from colorama import init, Fore, Style
+import aiohttp
 
 # Constants
 SERVER_URL = 'http://localhost:5001'
@@ -33,6 +34,10 @@ shutdown_requested = False
 # Track health messages to only show once per minute
 last_health_log_time = 0
 health_message_count = 0
+
+# Paper trading portfolio tracking
+last_portfolio_check = 0
+portfolio_check_interval = 30  # seconds
 
 def signal_handler(sig, frame):
     """Handle graceful shutdown on SIGINT (Ctrl+C)"""
@@ -124,7 +129,9 @@ async def connect():
     print(f"{Fore.GREEN}✅ Client ID: {sio.sid}{Style.RESET_ALL}")
     print(f"{Fore.GREEN}✅ Transport: {sio.transport()}{Style.RESET_ALL}")
     print(f"{Fore.CYAN}🎧 Listening for events: pool_status_6, pool_ready, health{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}💰 Paper Trading Events: paper_trading_update, early_position_entered, early_position_exited{Style.RESET_ALL}")
     print(f"{Fore.CYAN}⏰ Health updates will be shown once per minute...{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}💼 Portfolio status will be checked every 30 seconds...{Style.RESET_ALL}")
     print(f"{Fore.YELLOW}💡 Press Ctrl+C to stop the listener{Style.RESET_ALL}")
 
 @sio.event
@@ -325,9 +332,15 @@ async def connect_to_server():
             # Check if already connected
             if sio.connected:
                 print(f"{Fore.YELLOW}Already connected to server, maintaining connection...{Style.RESET_ALL}")
-                # Keep the connection alive
+                # Keep the connection alive and check portfolio periodically
                 while running and sio.connected:
                     await asyncio.sleep(1)
+                    
+                    # Check paper trading portfolio every 30 seconds
+                    current_time = datetime.now().timestamp()
+                    if current_time - last_portfolio_check >= portfolio_check_interval:
+                        await check_paper_portfolio()
+                        
                 if not running:
                     break
                 continue
@@ -336,10 +349,15 @@ async def connect_to_server():
             await sio.connect(SERVER_URL)
             print(f"{Fore.GREEN}Connection established. Client ID: {sio.sid}{Style.RESET_ALL}")
             
-            # Keep the connection alive
+            # Keep the connection alive and check portfolio periodically
             while running and sio.connected:
                 await asyncio.sleep(1)
                 
+                # Check paper trading portfolio every 30 seconds
+                current_time = datetime.now().timestamp()
+                if current_time - last_portfolio_check >= portfolio_check_interval:
+                    await check_paper_portfolio()
+                    
             if not running:
                 break
                 
@@ -367,6 +385,155 @@ async def main():
         if sio.connected:
             await sio.disconnect()
         print(f"{Fore.GREEN}Listener stopped{Style.RESET_ALL}")
+
+async def check_paper_portfolio():
+    """Check paper trading portfolio status via HTTP API"""
+    global last_portfolio_check
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f'{SERVER_URL}/trading/paper-portfolio') as response:
+                if response.status == 200:
+                    data = await response.json()
+                    portfolio = data.get('data', {})
+                    
+                    # Only show if there's activity or every 5 minutes
+                    current_time = datetime.now()
+                    should_show = (
+                        portfolio.get('totalTrades', 0) > 0 or
+                        portfolio.get('activePositions', 0) > 0 or
+                        (current_time.timestamp() - last_portfolio_check) >= 300  # 5 minutes
+                    )
+                    
+                    if should_show:
+                        print(f"\n{Fore.MAGENTA}💰 PAPER TRADING PORTFOLIO STATUS:{Style.RESET_ALL}")
+                        print(f"{Fore.MAGENTA}════════════════════════════════════════════════════════════════════════════════{Style.RESET_ALL}")
+                        print(f"{Fore.MAGENTA}Balance: {portfolio.get('balance', 0):.4f} SOL{Style.RESET_ALL}")
+                        print(f"{Fore.MAGENTA}Total PnL: {portfolio.get('totalPnL', 0):.4f} SOL{Style.RESET_ALL}")
+                        print(f"{Fore.MAGENTA}Total Trades: {portfolio.get('totalTrades', 0)}{Style.RESET_ALL}")
+                        print(f"{Fore.MAGENTA}Success Rate: {portfolio.get('successRate', 0):.1f}%{Style.RESET_ALL}")
+                        print(f"{Fore.MAGENTA}Active Positions: {portfolio.get('activePositions', 0)}/{portfolio.get('maxPositions', 3)}{Style.RESET_ALL}")
+                        
+                        # Show recent trades if any
+                        recent_trades = portfolio.get('recentTrades', [])
+                        if recent_trades:
+                            print(f"{Fore.MAGENTA}Recent Trades:{Style.RESET_ALL}")
+                            for trade in recent_trades[-3:]:  # Last 3 trades
+                                trade_type = trade.get('type', 'unknown')
+                                price = trade.get('price', 0)
+                                amount = trade.get('amount', 0)
+                                timestamp = datetime.fromtimestamp(trade.get('timestamp', 0) / 1000)
+                                print(f"{Fore.MAGENTA}  {trade_type.upper()}: {amount:.4f} SOL @ {price:.8f} ({timestamp.strftime('%H:%M:%S')}){Style.RESET_ALL}")
+                        
+                        print(f"{Fore.MAGENTA}════════════════════════════════════════════════════════════════════════════════{Style.RESET_ALL}")
+                        last_portfolio_check = current_time.timestamp()
+                        
+    except Exception as e:
+        print(f"{Fore.RED}Error checking paper portfolio: {e}{Style.RESET_ALL}")
+
+@sio.on('paper_trading_update')
+async def on_paper_trading_update(data):
+    """Handle paper trading portfolio updates"""
+    if not running:
+        return
+        
+    log_message("PAPER_TRADING_UPDATE", {
+        **data,
+        "client_id": sio.sid,
+        "received_at": datetime.now().isoformat()
+    })
+    
+    try:
+        print(f"\n{Fore.MAGENTA}💰 PAPER TRADING UPDATE:{Style.RESET_ALL}")
+        print(f"{Fore.MAGENTA}════════════════════════════════════════════════════════════════════════════════{Style.RESET_ALL}")
+        
+        # Trade information
+        trade_type = data.get('type', 'unknown')
+        pool_id = data.get('pool_id', 'N/A')
+        amount = data.get('amount', 0)
+        price = data.get('price', 0)
+        pnl = data.get('pnl', 0)
+        
+        print(f"{Fore.MAGENTA}Type: {trade_type.upper()}{Style.RESET_ALL}")
+        print(f"{Fore.MAGENTA}Pool: {pool_id[:8]}...{Style.RESET_ALL}")
+        print(f"{Fore.MAGENTA}Amount: {amount:.4f} SOL{Style.RESET_ALL}")
+        print(f"{Fore.MAGENTA}Price: {price:.8f} SOL{Style.RESET_ALL}")
+        
+        if pnl != 0:
+            pnl_color = Fore.GREEN if pnl > 0 else Fore.RED
+            print(f"{pnl_color}PnL: {pnl:+.4f} SOL{Style.RESET_ALL}")
+        
+        # Portfolio balance
+        balance = data.get('balance', 0)
+        print(f"{Fore.MAGENTA}Portfolio Balance: {balance:.4f} SOL{Style.RESET_ALL}")
+        
+        print(f"{Fore.MAGENTA}════════════════════════════════════════════════════════════════════════════════{Style.RESET_ALL}")
+        
+    except Exception as e:
+        print(f"{Fore.RED}Error processing paper trading update: {str(e)}{Style.RESET_ALL}")
+
+@sio.on('early_position_entered')
+async def on_early_position_entered(data):
+    """Handle early position entry events"""
+    if not running:
+        return
+        
+    log_message("EARLY_POSITION_ENTERED", {
+        **data,
+        "client_id": sio.sid,
+        "received_at": datetime.now().isoformat()
+    })
+    
+    try:
+        timestamp = datetime.fromtimestamp(data.get('timestamp', 0) / 1000)
+        formatted_time = timestamp.strftime('%Y-%m-%d %H:%M:%S')
+        
+        print(f"\n{Fore.GREEN}[{formatted_time}] 🚀 EARLY POSITION ENTERED:{Style.RESET_ALL}")
+        print(f"{Fore.GREEN}════════════════════════════════════════════════════════════════════════════════{Style.RESET_ALL}")
+        print(f"{Fore.GREEN}Position ID: {data.get('position_id', 'N/A')}{Style.RESET_ALL}")
+        print(f"{Fore.GREEN}Pool ID: {data.get('pool_id', 'N/A')}{Style.RESET_ALL}")
+        print(f"{Fore.GREEN}Entry Price: {data.get('entry_price', 0):.8f} SOL{Style.RESET_ALL}")
+        print(f"{Fore.GREEN}Amount: {data.get('amount', 0):.4f} SOL{Style.RESET_ALL}")
+        print(f"{Fore.GREEN}════════════════════════════════════════════════════════════════════════════════{Style.RESET_ALL}")
+        
+    except Exception as e:
+        print(f"{Fore.RED}Error processing early position entry: {str(e)}{Style.RESET_ALL}")
+
+@sio.on('early_position_exited')
+async def on_early_position_exited(data):
+    """Handle early position exit events"""
+    if not running:
+        return
+        
+    log_message("EARLY_POSITION_EXITED", {
+        **data,
+        "client_id": sio.sid,
+        "received_at": datetime.now().isoformat()
+    })
+    
+    try:
+        timestamp = datetime.fromtimestamp(data.get('timestamp', 0) / 1000)
+        formatted_time = timestamp.strftime('%Y-%m-%d %H:%M:%S')
+        
+        print(f"\n{Fore.YELLOW}[{formatted_time}] 🎯 EARLY POSITION EXITED:{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}════════════════════════════════════════════════════════════════════════════════{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}Position ID: {data.get('position_id', 'N/A')}{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}Pool ID: {data.get('pool_id', 'N/A')}{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}Exit Price: {data.get('exit_price', 0):.8f} SOL{Style.RESET_ALL}")
+        
+        pnl = data.get('pnl', 0)
+        pnl_percent = data.get('pnl_percentage', 0)
+        reason = data.get('reason', 'unknown')
+        time_elapsed = data.get('time_elapsed', 0)
+        
+        pnl_color = Fore.GREEN if pnl > 0 else Fore.RED
+        print(f"{pnl_color}PnL: {pnl:+.4f} SOL ({pnl_percent:+.2f}%){Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}Reason: {reason.upper()}{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}Time Elapsed: {time_elapsed} minutes{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}════════════════════════════════════════════════════════════════════════════════{Style.RESET_ALL}")
+        
+    except Exception as e:
+        print(f"{Fore.RED}Error processing early position exit: {str(e)}{Style.RESET_ALL}")
 
 if __name__ == '__main__':
     try:

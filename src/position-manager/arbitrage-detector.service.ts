@@ -21,6 +21,7 @@ interface ArbitrageOpportunity {
   };
   status: 'monitoring' | 'entered' | 'exited' | 'stopped';
   lastUpdate: number;
+  lastProgressLog?: number; // Add this for progress logging control
 }
 
 interface ArbitragePattern {
@@ -216,7 +217,8 @@ export class ArbitrageDetectorService implements OnModuleInit {
         tvlExitThreshold: baselineTVL * (1 + pattern.exitStrategy.tvlExitThresholdPercent / 100)
       },
       status: 'monitoring',
-      lastUpdate: Date.now()
+      lastUpdate: Date.now(),
+      lastProgressLog: Date.now(), // Initialize progress logging
     };
 
     this.opportunities.set(poolId, opportunity);
@@ -275,13 +277,19 @@ export class ArbitrageDetectorService implements OnModuleInit {
       return;
     }
 
-    // Log progress for monitoring
+    // Log progress for monitoring (only every 30 seconds and only if significant progress)
     if (opportunity.status === 'monitoring') {
       const profitPercent = opportunity.priceChangePercent;
       const timeElapsed = Math.round(timeSinceEntry / 1000 / 60);
       
       if (profitPercent >= 10) {
-        this.logger.log(`📈 OPPORTUNITY PROGRESS: ${opportunity.poolId} | +${profitPercent.toFixed(2)}% profit | ${timeElapsed}m elapsed`);
+        const secondsSinceLastLog = (now - (opportunity.lastProgressLog || 0)) / 1000;
+        
+        // Only log every 30 seconds to reduce noise
+        if (!opportunity.lastProgressLog || secondsSinceLastLog >= 30) {
+          this.logger.log(`📈 OPPORTUNITY PROGRESS: ${opportunity.poolId} | +${profitPercent.toFixed(2)}% profit | ${timeElapsed}m elapsed`);
+          opportunity.lastProgressLog = now;
+        }
       }
     }
   }
@@ -378,4 +386,4 @@ export class ArbitrageDetectorService implements OnModuleInit {
       this.executeExit(opportunity, reason, `Manual exit: ${reason}`);
     }
   }
-} 
+}

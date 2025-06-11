@@ -45,6 +45,11 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
   private totalMessageCount = 0; // Never resets, for logging
   private lastMessageTime = Date.now();
   
+  // Pool filtering statistics
+  private poolsFilteredOut = 0;
+  private poolsProcessed = 0;
+  private lastStatsReset = Date.now();
+  
   // Configuration
   private readonly config = {
     maxPendingPools: 100,
@@ -301,6 +306,7 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
 
       // Only look for Status 6 pools
       if (poolState.status !== 6) {
+        this.poolsFilteredOut++;
         return;
       }
 
@@ -310,23 +316,28 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
       
       // Skip pools with invalid open times
       if (poolOpenTime === 0) {
+        this.poolsFilteredOut++;
         return;
       }
       
       // Skip pools with future open times (more than 5 minutes in future)
       if (poolOpenTime > currentTime + 300) {
+        this.poolsFilteredOut++;
         return;
       }
       
-      // Skip pools that are too old (older than 10 minutes)
-      if (currentTime - poolOpenTime > 600) {
+      // Skip pools that are too old (older than 1 hour instead of 10 minutes)
+      const poolAge = currentTime - poolOpenTime;
+      if (poolAge > 3600) {
+        this.poolsFilteredOut++;
         return;
       }
 
       // This is a NEW Status 6 pool!
+      this.poolsProcessed++;
       this.logger.log(`🚀 NEW STATUS 6 DETECTED: ${poolId}`);
       this.logger.log(`Pool opens at: ${new Date(poolState.poolOpenTime * 1000)}`);
-      this.logger.log(`⏱️  Pool age: ${currentTime - poolOpenTime}s`);
+      this.logger.log(`⏱️  Pool age: ${poolAge}s`);
 
       // Get token info
       const tokenInfo = await this.getTokenInfo(poolState.baseMint, poolState.quoteMint);
@@ -385,7 +396,7 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
           token_b: newPoolState.token_b,
           
           // Additional metadata
-          pool_age_seconds: Math.floor(Date.now() / 1000) - poolState.poolOpenTime
+          pool_age_seconds: poolAge
         }
       });
 
@@ -634,27 +645,27 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
   }
 
   private performHealthCheck(): void {
-    try {
-      const stats = this.getPoolStats();
-      const messageStats = this.getMessageStats();
-      
-      this.logger.log(`💚 Health check - Pending: ${stats.pending}/${stats.max_pending} | Messages: ${messageStats.messages_per_minute}/min | Active: ${messageStats.is_active ? '✅' : '❌'}`);
-      
-      // Check for potential issues
-      if (stats.pending > this.config.maxPendingPools * 0.8) {
-        this.logger.warn(`⚠️  High pending pool count: ${stats.pending}/${this.config.maxPendingPools}`);
-      }
-      
-      if (!messageStats.is_active) {
-        this.logger.warn(`⚠️  No Raydium messages received in last minute`);
-      }
-      
-      // Reset message count for next minute
-      this.messageCount = 0;
-      
-    } catch (error) {
-      this.logger.error('Error during health check:', error instanceof Error ? error.message : 'Unknown error');
+    const now = Date.now();
+    const timeSinceLastMessage = now - this.lastMessageTime;
+    const messagesPerMinute = this.messageCount;
+    
+    // Reset counters every 5 minutes
+    if (now - this.lastStatsReset > 300000) {
+      this.poolsFilteredOut = 0;
+      this.poolsProcessed = 0;
+      this.lastStatsReset = now;
     }
+    
+    this.logger.log(`🏥 HEALTH CHECK - ${new Date().toLocaleTimeString()}`);
+    this.logger.log(`   ⏱️  Server uptime: ${Math.floor(process.uptime() / 3600)}h ${Math.floor((process.uptime() % 3600) / 60)}m`);
+    this.logger.log(`   💓 Health messages received: ${this.messageCount}`);
+    this.logger.log(`   🆕 New pools detected: ${this.poolsProcessed}`);
+    this.logger.log(`   🚫 Pools filtered out: ${this.poolsFilteredOut}`);
+    this.logger.log(`   📊 Filter ratio: ${this.poolsFilteredOut > 0 ? (this.poolsProcessed / this.poolsFilteredOut * 100).toFixed(2) : 0}% processed`);
+    this.logger.log(`   🎯 Pending pools: ${this.pendingPools.size}/${this.config.maxPendingPools}`);
+    
+    // Reset message count for next check
+    this.messageCount = 0;
   }
 
   // NEW: Add individual listener for a specific pool to watch for Status 6

@@ -720,17 +720,6 @@ export class LifeguardService implements OnModuleInit {
     // Different logging based on reason
     switch (reason) {
       case 'dead':
-        // Emit rug detection event to trigger position exit
-        this.logger.log(`🚨 RUG DETECTED: Emitting position exit event for pool ${poolId}`);
-        this.eventEmitter.emit('rug_detected', {
-          pool_id: poolId,
-          reason: 'rug_detection',
-          timestamp: Date.now(),
-          baseline_tvl: monitor.baselineTVL,
-          baseline_price: monitor.baselinePrice,
-          last_tvl: monitor.lastTVL,
-          last_price: monitor.lastPrice
-        });
         this.logger.log(`💀 Stopped monitoring dead pool ${poolId} (TVL dropped below threshold)`);
         break;
       case 'manual':

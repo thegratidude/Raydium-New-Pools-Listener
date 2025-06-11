@@ -23,6 +23,12 @@ interface EarlyTradingConfig {
     maxHoldTime: number; // 60 minutes max hold
     tvlExitThreshold: number; // -20% TVL drop threshold
     partialExitPercent: number; // 50% at 15% profit
+    trailingStopLoss: {
+      enabled: boolean; // Enable trailing stop loss
+      activationPercent: number; // Activate trailing stop when profit reaches this % (e.g., 3%)
+      trailingDistance: number; // Distance behind current price (e.g., 2%)
+      breakevenLock: number; // Move to breakeven at this profit % (e.g., 8%)
+    };
   };
   riskManagement: {
     maxDailyLoss: number; // 2.0 SOL daily loss limit
@@ -44,9 +50,9 @@ interface EarlyPosition {
   lastUpdate: number;
   
   // Position sizing
-  totalInvestment: number; // 1.0 SOL total investment
-  firstHalfAmount: number; // 0.5 SOL for first exit
-  secondHalfAmount: number; // 0.5 SOL for second exit
+  totalInvestment: number;
+  firstHalfAmount: number;
+  secondHalfAmount: number;
   
   // Exit tracking
   firstHalfExited: boolean;
@@ -55,7 +61,7 @@ interface EarlyPosition {
   secondExitPrice: number;
   
   // Status
-  status: 'monitoring' | 'entered' | 'partial_exit' | 'exited' | 'stopped';
+  status: 'entered' | 'exited' | 'stopped';
   exitReason: string;
   
   // Performance tracking
@@ -65,10 +71,35 @@ interface EarlyPosition {
   secondHalfPnL: number;
   
   // Paper trading tracking
-  paperTradeId?: string;
-  tokensPurchased?: number;
-  firstHalfTokens?: number;
-  secondHalfTokens?: number;
+  paperTradeId: string;
+  tokensPurchased: number;
+  firstHalfTokens: number;
+  secondHalfTokens: number;
+  
+  // Progress logging
+  lastProgressLog: number;
+  
+  // Re-entry tracking
+  isReEntry: boolean;
+  originalEntryTime: number;
+  reEntryCount: number;
+  
+  // Trailing stop loss tracking
+  trailingStopActive: boolean;
+  trailingStopPrice: number;
+  highestPrice: number;
+  highestPriceTime: number;
+}
+
+interface PoolReEntryTracker {
+  poolId: string;
+  successfulExits: number;
+  lastExitTime: number;
+  lastExitPrice: number;
+  lastExitReason: string;
+  reEntryCount: number;
+  maxReEntries: number;
+  originalEntryTime: number;
 }
 
 export interface PaperTrade {
@@ -105,7 +136,7 @@ export class EarlyTradingStrategyService implements OnModuleInit {
   private config: EarlyTradingConfig = {
     enabled: true,
     positionSize: 1.0,
-    maxPositions: 3,
+    maxPositions: 5,
     paperTrading: {
       enabled: true,
       initialBalance: 10.0, // 10 SOL starting balance
@@ -119,10 +150,16 @@ export class EarlyTradingStrategyService implements OnModuleInit {
     },
     exitConditions: {
       takeProfitPercent: 25, // 25% take profit
-      stopLossPercent: 15, // 15% stop loss
+      stopLossPercent: 8, // 8% stop loss (tighter than 10%)
       maxHoldTime: 60, // 60 minutes max hold
       tvlExitThreshold: -20, // -20% TVL drop threshold
       partialExitPercent: 50, // 50% at 15% profit
+      trailingStopLoss: {
+        enabled: true, // Enable trailing stop loss
+        activationPercent: 2, // Activate trailing stop when profit reaches 2% (down from 3%)
+        trailingDistance: 1.5, // Distance behind current price (1.5% down from 2%)
+        breakevenLock: 6, // Move to breakeven at 6% profit (down from 8%)
+      },
     },
     riskManagement: {
       maxDailyLoss: 2.0,
@@ -133,6 +170,7 @@ export class EarlyTradingStrategyService implements OnModuleInit {
   };
 
   private activePositions: Map<string, EarlyPosition> = new Map();
+  private poolReEntryTrackers: Map<string, PoolReEntryTracker> = new Map();
   private paperPortfolio: PaperPortfolio = {
     balance: 10.0, // Start with 10 SOL
     positions: new Map(),
@@ -174,6 +212,9 @@ export class EarlyTradingStrategyService implements OnModuleInit {
     
     // Listen for arbitrage opportunities
     this.eventEmitter.on('arbitrage_opportunity', this.handleArbitrageOpportunity.bind(this));
+    
+    // Listen for rug detection events
+    this.eventEmitter.on('rug_detected', this.handleRugDetection.bind(this));
   }
 
   private startBackgroundMonitoring() {
@@ -217,6 +258,36 @@ export class EarlyTradingStrategyService implements OnModuleInit {
     }
   }
 
+  private handleRugDetection(data: any) {
+    const { pool_id, reason, timestamp, baseline_tvl, baseline_price, last_tvl, last_price } = data;
+    
+    this.logger.log(`🚨 RUG DETECTED: Pool ${pool_id} - Immediate position exit required`);
+    this.logger.log(`   Reason: ${reason}`);
+    this.logger.log(`   Baseline TVL: ${baseline_tvl.toFixed(2)} SOL`);
+    this.logger.log(`   Last TVL: ${last_tvl.toFixed(2)} SOL`);
+    this.logger.log(`   Baseline Price: ${baseline_price.toFixed(8)} SOL`);
+    this.logger.log(`   Last Price: ${last_price.toFixed(8)} SOL`);
+    
+    // Check if we have an active position in this pool
+    const position = this.activePositions.get(pool_id);
+    if (!position) {
+      this.logger.log(`ℹ️ No active position found for pool ${pool_id}`);
+      return;
+    }
+    
+    // Immediately exit the position
+    this.logger.log(`🚨 EMERGENCY EXIT: Exiting position for rugged pool ${pool_id}`);
+    this.executeFullExit(position, 'rug_detection', `Rug detected - TVL dropped below threshold. Baseline: ${baseline_tvl.toFixed(2)} SOL, Last: ${last_tvl.toFixed(2)} SOL`);
+    
+    // Remove from active positions
+    this.activePositions.delete(pool_id);
+    
+    // Update daily stats
+    this.dailyStats.failedTrades++;
+    
+    this.logger.log(`✅ Emergency exit completed for pool ${pool_id}`);
+  }
+
   private shouldEnterEarlyPosition(data: any): boolean {
     const { poolId, priceChangePercent, tvlChangePercent, baselineTVL } = data;
     
@@ -230,6 +301,13 @@ export class EarlyTradingStrategyService implements OnModuleInit {
       return false;
     }
     
+    // Check re-entry eligibility
+    const reEntryTracker = this.poolReEntryTrackers.get(poolId);
+    if (reEntryTracker && reEntryTracker.reEntryCount >= reEntryTracker.maxReEntries) {
+      this.logger.log(`🚫 Pool ${poolId} has reached maximum re-entries (${reEntryTracker.maxReEntries})`);
+      return false;
+    }
+    
     // Check entry conditions
     const meetsPriceCondition = priceChangePercent >= this.config.entryConditions.minPriceIncrease;
     const meetsTVLCondition = tvlChangePercent >= this.config.entryConditions.minTVLIncrease;
@@ -240,6 +318,12 @@ export class EarlyTradingStrategyService implements OnModuleInit {
       this.logger.log(`   Price increase: ${priceChangePercent.toFixed(2)}% (min: ${this.config.entryConditions.minPriceIncrease}%)`);
       this.logger.log(`   TVL increase: ${tvlChangePercent.toFixed(2)}% (min: ${this.config.entryConditions.minTVLIncrease}%)`);
       this.logger.log(`   Baseline TVL: ${baselineTVL.toFixed(2)} SOL (min: ${this.config.entryConditions.minBaselineTVL} SOL)`);
+      
+      // Log re-entry status if applicable
+      if (reEntryTracker) {
+        this.logger.log(`   🔄 Re-entry #${reEntryTracker.reEntryCount + 1} (max: ${reEntryTracker.maxReEntries})`);
+      }
+      
       return true;
     }
     
@@ -263,8 +347,39 @@ export class EarlyTradingStrategyService implements OnModuleInit {
   private enterEarlyPosition(poolId: string, data: any) {
     const { currentPrice, baselinePrice, currentTVL, baselineTVL } = data;
     
+    // Check if this is a re-entry
+    const reEntryTracker = this.poolReEntryTrackers.get(poolId);
+    const isReEntry = reEntryTracker && reEntryTracker.successfulExits > 0;
+    
+    // Determine position size and exit conditions based on re-entry status
+    let positionSize: number;
+    let takeProfitPercent: number;
+    let stopLossPercent: number;
+    let maxHoldTime: number;
+    
+    if (isReEntry) {
+      // Re-entry rules: 20% take profit, 6% stop loss, 15min max hold
+      positionSize = 0.5;
+      takeProfitPercent = 20;
+      stopLossPercent = 6;
+      maxHoldTime = 15 * 60 * 1000; // 15 minutes
+      
+      // Increment re-entry count
+      reEntryTracker.reEntryCount++;
+      
+      this.logger.log(`🔄 RE-ENTRY DETECTED: Pool ${poolId} (Re-entry #${reEntryTracker.reEntryCount})`);
+      this.logger.log(`   Previous exits: ${reEntryTracker.successfulExits} successful`);
+      this.logger.log(`   Last exit: ${reEntryTracker.lastExitReason} at ${reEntryTracker.lastExitPrice.toFixed(8)} SOL`);
+    } else {
+      // First entry rules: 25% take profit, 8% stop loss, 30min max hold
+      positionSize = this.config.positionSize;
+      takeProfitPercent = 25;
+      stopLossPercent = 8;
+      maxHoldTime = 30 * 60 * 1000; // 30 minutes
+    }
+    
     // Execute paper buy trade
-    const buyResult = this.executePaperBuy(poolId, currentPrice, this.config.positionSize);
+    const buyResult = this.executePaperBuy(poolId, currentPrice, positionSize);
     if (!buyResult.success) {
       this.logger.error(`❌ Paper buy failed for pool ${poolId}: ${buyResult.error}`);
       return;
@@ -282,9 +397,9 @@ export class EarlyTradingStrategyService implements OnModuleInit {
       lastUpdate: Date.now(),
       
       // Position sizing
-      totalInvestment: this.config.positionSize,
-      firstHalfAmount: this.config.positionSize * 0.5,
-      secondHalfAmount: this.config.positionSize * 0.5,
+      totalInvestment: positionSize,
+      firstHalfAmount: positionSize * 0.5,
+      secondHalfAmount: positionSize * 0.5,
       
       // Exit tracking
       firstHalfExited: false,
@@ -307,18 +422,32 @@ export class EarlyTradingStrategyService implements OnModuleInit {
       tokensPurchased: buyResult.tokens,
       firstHalfTokens: buyResult.tokens * 0.5,
       secondHalfTokens: buyResult.tokens * 0.5,
+      
+      // Progress logging
+      lastProgressLog: Date.now(),
+      
+      // Re-entry tracking
+      isReEntry,
+      originalEntryTime: isReEntry ? reEntryTracker.originalEntryTime || Date.now() : Date.now(),
+      reEntryCount: isReEntry ? reEntryTracker.reEntryCount : 0,
+      
+      // Trailing stop loss tracking
+      trailingStopActive: false,
+      trailingStopPrice: 0,
+      highestPrice: 0,
+      highestPriceTime: 0,
     };
 
     this.activePositions.set(poolId, position);
     
-    this.logger.log(`🚀 ENTERED EARLY POSITION: ${poolId}`);
-    this.logger.log(`💰 Investment: ${this.config.positionSize} SOL`);
+    this.logger.log(`🚀 ENTERED EARLY POSITION: ${poolId}${isReEntry ? ' (RE-ENTRY)' : ''}`);
+    this.logger.log(`💰 Investment: ${positionSize} SOL${isReEntry ? ' (reduced size)' : ''}`);
     this.logger.log(`📊 Entry Price: ${currentPrice.toFixed(8)} SOL`);
     this.logger.log(`📈 Baseline TVL: ${baselineTVL.toFixed(2)} SOL`);
-    this.logger.log(`🎯 Take Profit: ${(currentPrice * (1 + this.config.exitConditions.takeProfitPercent / 100)).toFixed(8)} SOL (+${this.config.exitConditions.takeProfitPercent}%)`);
-    this.logger.log(`🛑 Stop Loss: ${(currentPrice * (1 - this.config.exitConditions.stopLossPercent / 100)).toFixed(8)} SOL (-${this.config.exitConditions.stopLossPercent}%)`);
-    this.logger.log(`⏰ Max Hold Time: ${this.config.exitConditions.maxHoldTime} minutes`);
-    this.logger.log(`📊 Paper Trade: ${buyResult.tokens.toFixed(2)} tokens purchased for ${this.config.positionSize} SOL`);
+    this.logger.log(`🎯 Take Profit: ${(currentPrice * (1 + takeProfitPercent / 100)).toFixed(8)} SOL (+${takeProfitPercent}%)`);
+    this.logger.log(`🛑 Stop Loss: ${(currentPrice * (1 - stopLossPercent / 100)).toFixed(8)} SOL (-${stopLossPercent}%)`);
+    this.logger.log(`⏰ Max Hold Time: ${maxHoldTime} minutes`);
+    this.logger.log(`📊 Paper Trade: ${buyResult.tokens.toFixed(2)} tokens purchased for ${positionSize} SOL`);
     this.logger.log(`💰 Portfolio Balance: ${this.paperPortfolio.balance.toFixed(4)} SOL`);
     
     // Emit position entered event
@@ -326,7 +455,8 @@ export class EarlyTradingStrategyService implements OnModuleInit {
       position_id: position.id,
       pool_id: poolId,
       entry_price: currentPrice,
-      amount: this.config.positionSize,
+      amount: positionSize,
+      is_re_entry: isReEntry,
       timestamp: Date.now()
     });
   }
@@ -456,27 +586,86 @@ export class EarlyTradingStrategyService implements OnModuleInit {
     const priceChangePercent = position.totalPnLPercent;
     const tvlChangePercent = ((position.currentTVL - position.baselineTVL) / position.baselineTVL) * 100;
     
-    // Check partial exit (50% at 15% profit)
-    if (!position.firstHalfExited && priceChangePercent >= 15) {
-      this.executePartialExit(position, 'take_profit_partial', '15% profit target reached');
+    // Update highest price for trailing stop loss
+    if (position.currentPrice > position.highestPrice) {
+      position.highestPrice = position.currentPrice;
+      position.highestPriceTime = now;
+    }
+    
+    // Determine exit conditions based on re-entry status
+    let takeProfitPercent: number;
+    let stopLossPercent: number;
+    let maxHoldTime: number;
+    
+    if (position.isReEntry) {
+      // Re-entry rules: 20% take profit, 6% stop loss, 15min max hold
+      takeProfitPercent = 20;
+      stopLossPercent = 6;
+      maxHoldTime = 15 * 60 * 1000; // 15 minutes
+    } else {
+      // First entry rules: 25% take profit, 8% stop loss, 30min max hold
+      takeProfitPercent = 25;
+      stopLossPercent = 8;
+      maxHoldTime = 30 * 60 * 1000; // 30 minutes
+    }
+    
+    // Trailing stop loss logic
+    if (this.config.exitConditions.trailingStopLoss.enabled) {
+      const trailingConfig = this.config.exitConditions.trailingStopLoss;
+      
+      // Check if trailing stop should be activated
+      if (!position.trailingStopActive && priceChangePercent >= trailingConfig.activationPercent) {
+        position.trailingStopActive = true;
+        const trailingStopPrice = position.currentPrice * (1 - trailingConfig.trailingDistance / 100);
+        position.trailingStopPrice = trailingStopPrice;
+        
+        this.logger.log(`🎯 TRAILING STOP ACTIVATED: ${position.poolId} at ${priceChangePercent.toFixed(2)}% profit`);
+        this.logger.log(`📊 Trailing stop price: ${trailingStopPrice.toFixed(8)} SOL (${trailingConfig.trailingDistance}% behind current)`);
+      }
+      
+      // Update trailing stop if active and price is higher
+      if (position.trailingStopActive && position.currentPrice > position.highestPrice) {
+        const newTrailingStopPrice = position.currentPrice * (1 - trailingConfig.trailingDistance / 100);
+        
+        // Only move trailing stop up, never down
+        if (newTrailingStopPrice > position.trailingStopPrice) {
+          position.trailingStopPrice = newTrailingStopPrice;
+          this.logger.log(`📈 TRAILING STOP UPDATED: ${position.poolId} to ${newTrailingStopPrice.toFixed(8)} SOL`);
+        }
+      }
+      
+      // Check breakeven lock
+      if (position.trailingStopActive && priceChangePercent >= trailingConfig.breakevenLock) {
+        const breakevenPrice = position.entryPrice;
+        if (position.trailingStopPrice < breakevenPrice) {
+          position.trailingStopPrice = breakevenPrice;
+          this.logger.log(`🔒 BREAKEVEN LOCK: ${position.poolId} trailing stop moved to breakeven at ${breakevenPrice.toFixed(8)} SOL`);
+        }
+      }
+      
+      // Check trailing stop loss exit
+      if (position.trailingStopActive && position.currentPrice <= position.trailingStopPrice) {
+        const trailingStopPercent = ((position.trailingStopPrice - position.entryPrice) / position.entryPrice) * 100;
+        this.executeFullExit(position, 'trailing_stop_loss', `Trailing stop loss triggered at ${trailingStopPercent.toFixed(2)}% profit`);
+        return;
+      }
+    }
+    
+    // Check full take profit (no partial exits)
+    if (priceChangePercent >= takeProfitPercent) {
+      this.executeFullExit(position, 'take_profit', `${takeProfitPercent}% profit target reached`);
       return;
     }
     
-    // Check full take profit (25% profit)
-    if (priceChangePercent >= this.config.exitConditions.takeProfitPercent) {
-      this.executeFullExit(position, 'take_profit', `${this.config.exitConditions.takeProfitPercent}% profit target reached`);
+    // Check stop loss (only if trailing stop is not active)
+    if (!position.trailingStopActive && priceChangePercent <= -stopLossPercent) {
+      this.executeFullExit(position, 'stop_loss', `${stopLossPercent}% stop loss triggered`);
       return;
     }
     
-    // Check stop loss (15% loss)
-    if (priceChangePercent <= -this.config.exitConditions.stopLossPercent) {
-      this.executeFullExit(position, 'stop_loss', `${this.config.exitConditions.stopLossPercent}% stop loss triggered`);
-      return;
-    }
-    
-    // Check max hold time (60 minutes)
-    if (timeSinceEntry >= this.config.exitConditions.maxHoldTime * 60 * 1000) {
-      this.executeFullExit(position, 'timeout', `Max hold time of ${this.config.exitConditions.maxHoldTime} minutes exceeded`);
+    // Check max hold time
+    if (timeSinceEntry >= maxHoldTime) {
+      this.executeFullExit(position, 'timeout', `Max hold time of ${maxHoldTime / 1000 / 60} minutes exceeded`);
       return;
     }
     
@@ -485,124 +674,104 @@ export class EarlyTradingStrategyService implements OnModuleInit {
       this.executeFullExit(position, 'tvl_drop', `TVL dropped ${Math.abs(tvlChangePercent).toFixed(2)}% below threshold`);
       return;
     }
-    
-    // Log progress for monitoring
-    if (priceChangePercent >= 10) {
-      const timeElapsed = Math.round(timeSinceEntry / 1000 / 60);
-      this.logger.log(`📈 EARLY POSITION PROGRESS: ${position.poolId} | +${priceChangePercent.toFixed(2)}% profit | ${timeElapsed}m elapsed`);
-    }
-  }
-
-  private executePartialExit(position: EarlyPosition, reason: string, message: string) {
-    // Execute paper sell for first half
-    const sellResult = this.executePaperSell(position.poolId, position.currentPrice, position.firstHalfAmount, true);
-    if (!sellResult.success) {
-      this.logger.error(`❌ Paper partial sell failed for pool ${position.poolId}: ${sellResult.error}`);
-      return;
-    }
-
-    position.firstHalfExited = true;
-    position.firstExitPrice = position.currentPrice;
-    position.status = 'partial_exit';
-    
-    const firstHalfPnL = sellResult.pnl || 0;
-    const firstHalfPnLPercent = ((position.firstExitPrice - position.entryPrice) / position.entryPrice) * 100;
-    
-    position.firstHalfPnL = firstHalfPnL;
-    position.totalPnL = firstHalfPnL;
-    
-    this.logger.log(`🎯 PARTIAL EXIT: ${position.poolId} | ${reason.toUpperCase()}`);
-    this.logger.log(`📊 First Half Result: +${firstHalfPnLPercent.toFixed(2)}% profit`);
-    this.logger.log(`💰 First Half PnL: +${firstHalfPnL.toFixed(4)} SOL`);
-    this.logger.log(`💡 Reason: ${message}`);
-    this.logger.log(`📈 Remaining: ${position.secondHalfAmount} SOL still in position`);
-    this.logger.log(`📊 Paper Trade: ${sellResult.tokens?.toFixed(2)} tokens sold for ${(sellResult.tokens || 0) * position.currentPrice} SOL`);
-    this.logger.log(`💰 Portfolio Balance: ${this.paperPortfolio.balance.toFixed(4)} SOL`);
-    this.logger.log(`📈 Total Portfolio PnL: ${this.paperPortfolio.totalPnL.toFixed(4)} SOL`);
-    
-    // Emit partial exit event
-    this.eventEmitter.emit('early_position_partial_exit', {
-      position_id: position.id,
-      pool_id: position.poolId,
-      exit_price: position.firstExitPrice,
-      pnl: firstHalfPnL,
-      pnl_percentage: firstHalfPnLPercent,
-      reason,
-      remaining_amount: position.secondHalfAmount,
-      timestamp: Date.now()
-    });
   }
 
   private executeFullExit(position: EarlyPosition, reason: string, message: string) {
-    // Execute paper sell for remaining position
-    const remainingAmount = position.firstHalfExited ? position.secondHalfAmount : position.totalInvestment;
-    const sellResult = this.executePaperSell(position.poolId, position.currentPrice, remainingAmount, position.firstHalfExited);
+    const currentPrice = position.currentPrice;
+    const totalTokens = position.tokensPurchased;
+    const totalValue = totalTokens * currentPrice;
+    const totalPnL = totalValue - position.totalInvestment;
+    const totalPnLPercent = ((currentPrice - position.entryPrice) / position.entryPrice) * 100;
+    
+    // Execute paper sell
+    const sellResult = this.executePaperSell(position.poolId, currentPrice, position.totalInvestment, false);
     if (!sellResult.success) {
-      this.logger.error(`❌ Paper full sell failed for pool ${position.poolId}: ${sellResult.error}`);
+      this.logger.error(`❌ Paper sell failed for pool ${position.poolId}: ${sellResult.error}`);
       return;
     }
-
+    
+    // Update position status
     position.status = 'exited';
     position.exitReason = reason;
+    position.totalPnL = totalPnL;
+    position.totalPnLPercent = totalPnLPercent;
     
-    // Calculate final PnL
-    let totalPnL = 0;
-    let totalPnLPercent = 0;
-    
-    if (position.firstHalfExited) {
-      // Partial exit already happened
-      const secondHalfPnL = sellResult.pnl || 0;
-      const secondHalfPnLPercent = ((position.currentPrice - position.entryPrice) / position.entryPrice) * 100;
-      
-      position.secondHalfPnL = secondHalfPnL;
-      position.secondExitPrice = position.currentPrice;
-      position.totalPnL = position.firstHalfPnL + secondHalfPnL;
-      position.totalPnLPercent = ((position.firstHalfPnL + secondHalfPnL) / position.totalInvestment) * 100;
-      
-      totalPnL = position.totalPnL;
-      totalPnLPercent = position.totalPnLPercent;
-    } else {
-      // Full exit
-      totalPnL = sellResult.pnl || 0;
-      totalPnLPercent = ((position.currentPrice - position.entryPrice) / position.entryPrice) * 100;
-      
-      position.totalPnL = totalPnL;
-      position.totalPnLPercent = totalPnLPercent;
+    // Track successful exits for re-entry eligibility
+    if (totalPnLPercent > 0) {
+      this.trackSuccessfulExit(position.poolId, currentPrice, reason, totalPnLPercent);
     }
-    
-    const timeElapsed = Math.round((Date.now() - position.entryTime) / 1000 / 60);
     
     this.logger.log(`🎯 FULL EXIT: ${position.poolId} | ${reason.toUpperCase()}`);
-    this.logger.log(`📊 Final Result: ${totalPnLPercent >= 0 ? '+' : ''}${totalPnLPercent.toFixed(2)}% profit in ${timeElapsed} minutes`);
-    this.logger.log(`💰 Total PnL: ${totalPnL >= 0 ? '+' : ''}${totalPnL.toFixed(4)} SOL`);
+    this.logger.log(`📊 Final Result: ${totalPnLPercent.toFixed(2)}% profit in ${Math.round((Date.now() - position.entryTime) / 1000 / 60)} minutes`);
+    this.logger.log(`💰 Total PnL: ${totalPnL.toFixed(4)} SOL`);
     this.logger.log(`💡 Reason: ${message}`);
-    this.logger.log(`📊 Paper Trade: ${sellResult.tokens?.toFixed(2)} tokens sold for ${(sellResult.tokens || 0) * position.currentPrice} SOL`);
+    this.logger.log(`📊 Paper Trade: ${totalTokens.toFixed(2)} tokens sold for ${totalValue.toFixed(4)} SOL`);
     this.logger.log(`💰 Portfolio Balance: ${this.paperPortfolio.balance.toFixed(4)} SOL`);
-    this.logger.log(`📈 Total Portfolio PnL: ${this.paperPortfolio.totalPnL.toFixed(4)} SOL`);
-    
-    // Update daily stats
-    this.dailyStats.totalTrades++;
-    this.dailyStats.successfulTrades++;
-    this.dailyStats.totalPnL += totalPnL;
-    
-    if (totalPnL < 0) {
-      this.dailyStats.dailyLoss += Math.abs(totalPnL);
-    }
-    
-    // Emit full exit event
-    this.eventEmitter.emit('early_position_exited', {
-      position_id: position.id,
-      pool_id: position.poolId,
-      exit_price: position.currentPrice,
-      pnl: totalPnL,
-      pnl_percentage: totalPnLPercent,
-      reason,
-      time_elapsed: timeElapsed,
-      timestamp: Date.now()
-    });
     
     // Remove from active positions
     this.activePositions.delete(position.poolId);
+    
+    // Emit position exited event
+    this.eventEmitter.emit('early_position_exited', {
+      position_id: position.id,
+      pool_id: position.poolId,
+      exit_price: currentPrice,
+      pnl: totalPnL,
+      pnl_percentage: totalPnLPercent,
+      reason,
+      is_re_entry: position.isReEntry,
+      re_entry_count: position.reEntryCount,
+      timestamp: Date.now()
+    });
+    
+    // If exit was due to stop loss, emit event to stop monitoring this pool
+    if (reason === 'stop_loss') {
+      this.logger.log(`🛑 STOP LOSS EXIT: Emitting stop monitoring event for pool ${position.poolId}`);
+      this.eventEmitter.emit('stop_monitoring_pool', {
+        pool_id: position.poolId,
+        reason: 'stop_loss_exit',
+        exit_price: currentPrice,
+        pnl_percentage: totalPnLPercent,
+        timestamp: Date.now()
+      });
+    }
+  }
+  
+  private trackSuccessfulExit(poolId: string, exitPrice: number, exitReason: string, pnlPercent: number) {
+    let tracker = this.poolReEntryTrackers.get(poolId);
+    
+    if (!tracker) {
+      // Create new tracker for this pool
+      tracker = {
+        poolId,
+        successfulExits: 0,
+        lastExitTime: 0,
+        lastExitPrice: 0,
+        lastExitReason: '',
+        reEntryCount: 0,
+        maxReEntries: 1, // Only allow 1 re-entry per pool
+        originalEntryTime: Date.now(),
+      };
+      this.poolReEntryTrackers.set(poolId, tracker);
+    }
+    
+    // Update tracker
+    tracker.successfulExits++;
+    tracker.lastExitTime = Date.now();
+    tracker.lastExitPrice = exitPrice;
+    tracker.lastExitReason = exitReason;
+    
+    this.logger.log(`✅ SUCCESSFUL EXIT TRACKED: Pool ${poolId}`);
+    this.logger.log(`   Successful exits: ${tracker.successfulExits}`);
+    this.logger.log(`   Re-entries used: ${tracker.reEntryCount}/${tracker.maxReEntries}`);
+    this.logger.log(`   PnL: +${pnlPercent.toFixed(2)}%`);
+    
+    // Log if pool is eligible for re-entry
+    if (tracker.reEntryCount < tracker.maxReEntries) {
+      this.logger.log(`   🔄 Pool eligible for re-entry (${tracker.maxReEntries - tracker.reEntryCount} remaining)`);
+    } else {
+      this.logger.log(`   🚫 Pool has reached maximum re-entries`);
+    }
   }
 
   private monitorActivePositions() {
@@ -623,6 +792,7 @@ export class EarlyTradingStrategyService implements OnModuleInit {
   }
 
   public resetPaperPortfolio(): void {
+    // Reset paper portfolio
     this.paperPortfolio = {
       balance: this.config.paperTrading.initialBalance,
       positions: new Map(),
@@ -631,7 +801,26 @@ export class EarlyTradingStrategyService implements OnModuleInit {
       totalTrades: 0,
       successfulTrades: 0,
     };
+    
+    // Clear active positions
+    this.activePositions.clear();
+    
+    // Clear re-entry trackers
+    this.poolReEntryTrackers.clear();
+    
+    // Reset daily stats
+    this.dailyStats = {
+      totalTrades: 0,
+      successfulTrades: 0,
+      failedTrades: 0,
+      totalPnL: 0,
+      dailyLoss: 0,
+      lastReset: Date.now(),
+    };
+    
     this.logger.log(`🔄 Paper trading portfolio reset to ${this.config.paperTrading.initialBalance} SOL`);
+    this.logger.log(`🔄 Cleared ${this.activePositions.size} active positions`);
+    this.logger.log(`🔄 Cleared ${this.poolReEntryTrackers.size} re-entry trackers`);
   }
 
   // Public methods for status and configuration
@@ -654,7 +843,7 @@ export class EarlyTradingStrategyService implements OnModuleInit {
       totalTrades: this.paperPortfolio.totalTrades,
       successfulTrades: this.paperPortfolio.successfulTrades,
       successRate: this.paperPortfolio.totalTrades > 0 ? (this.paperPortfolio.successfulTrades / this.paperPortfolio.totalTrades) * 100 : 0,
-      activePositions: this.paperPortfolio.positions.size,
+      activePositions: this.activePositions.size,
       recentTrades: this.paperPortfolio.trades.slice(-5), // Last 5 trades
     };
   }
@@ -683,7 +872,7 @@ export class EarlyTradingStrategyService implements OnModuleInit {
         totalPnL: paperPortfolio.totalPnL,
         totalTrades: paperPortfolio.totalTrades,
         successRate: paperPortfolio.successRate,
-        activePositions: paperPortfolio.activePositions,
+        activePositions: this.activePositions.size,
       },
     };
     

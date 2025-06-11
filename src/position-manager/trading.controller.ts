@@ -219,6 +219,64 @@ export class TradingController {
     }
   }
 
+  @Get('paper-portfolio/total-value')
+  async getTotalPortfolioValue() {
+    try {
+      const portfolio = this.earlyTradingService.getPaperPortfolio();
+      const activePositions = this.earlyTradingService.getActivePositions();
+      
+      // Calculate current market value of open positions
+      let totalPositionValue = 0;
+      let unrealizedPnL = 0;
+      const positionDetails = [];
+      
+      for (const position of activePositions) {
+        const currentValue = position.tokensPurchased * position.currentPrice;
+        const entryValue = position.tokensPurchased * position.entryPrice;
+        const positionUnrealizedPnL = currentValue - entryValue;
+        
+        totalPositionValue += currentValue;
+        unrealizedPnL += positionUnrealizedPnL;
+        
+        positionDetails.push({
+          poolId: position.poolId,
+          tokens: position.tokensPurchased,
+          entryPrice: position.entryPrice,
+          currentPrice: position.currentPrice,
+          entryValue: entryValue,
+          currentValue: currentValue,
+          unrealizedPnL: positionUnrealizedPnL,
+          unrealizedPnLPercent: ((position.currentPrice - position.entryPrice) / position.entryPrice) * 100
+        });
+      }
+      
+      const totalPortfolioValue = portfolio.balance + totalPositionValue;
+      const totalUnrealizedPnL = portfolio.totalPnL + unrealizedPnL;
+      
+      return {
+        status: 'success',
+        data: {
+          cash: portfolio.balance,
+          positionValue: totalPositionValue,
+          totalPortfolioValue: totalPortfolioValue,
+          realizedPnL: portfolio.totalPnL,
+          unrealizedPnL: unrealizedPnL,
+          totalPnL: totalUnrealizedPnL,
+          activePositions: portfolio.activePositions,
+          totalTrades: portfolio.totalTrades,
+          successRate: portfolio.successRate,
+          positionDetails: positionDetails
+        }
+      };
+    } catch (error) {
+      this.logger.error('Error getting total portfolio value:', error);
+      return {
+        status: 'error',
+        error: error.message
+      };
+    }
+  }
+
   @Post('paper-portfolio/reset')
   async resetPaperPortfolio() {
     try {
