@@ -5,6 +5,17 @@ import { Status6Pool, PoolSnapshot } from '../position-manager/database/position
 import { Connection, PublicKey } from '@solana/web3.js';
 import * as anchor from '@project-serum/anchor';
 
+/**
+ * LifeguardService - Monitors and manages pool monitoring lifecycle
+ * 
+ * Features:
+ * - Monitors pools for 30 minutes after detection
+ * - Adaptive update intervals based on pool priority and TVL
+ * - Automatic cleanup of old monitoring sessions
+ * - Health checks and performance monitoring
+ * - Graceful shutdown handling
+ */
+
 interface PoolMonitor {
   poolId: string;
   baseVault: string;
@@ -20,12 +31,18 @@ interface PoolMonitor {
   consecutiveErrors: number; // Track errors for backoff
   lastPrice: number; // Track last price to detect changes
   lastTVL: number; // Track last TVL to detect changes
+  ratioWarningLogged: boolean; // Track if ratio warning has been logged
+  ratioGraceStart?: number; // Track when suspicious ratio was first detected
+  ratioGraceRetries?: number; // Track number of retries for suspicious ratio
+  decimals_a: number; // Base token decimals
+  decimals_b: number; // Quote token decimals
 }
 
 interface PoolMetrics {
   baseReserve: number;
   quoteReserve: number;
   reserveRatio: number;
+  priceInSOL: number;
   tvl: number;
   profitLossPercent: number;
   tvlChangePercent: number;
@@ -45,9 +62,12 @@ export class LifeguardService implements OnModuleInit {
   private readonly logger = new Logger(LifeguardService.name);
   private readonly connection: Connection;
   private readonly monitoredPools = new Map<string, PoolMonitor>();
-  private readonly MONITORING_DURATION = 15 * 60 * 1000; // 15 minutes in milliseconds
+  private readonly MONITORING_DURATION = 30 * 60 * 1000; // 30 minutes in milliseconds
   private readonly DEFAULT_UPDATE_INTERVAL = 2000; // 2 seconds default
   private isInitialized = false;
+  
+  // Track pools currently being processed to avoid duplicate baseline establishment
+  private readonly processingPools = new Set<string>();
 
   // Rate limiting and optimization
   private readonly rateLimitConfig: RateLimitConfig = {
@@ -56,6 +76,16 @@ export class LifeguardService implements OnModuleInit {
     batchSize: 3, // Process pools in batches
     backoffMultiplier: 1.5,
     maxBackoffMs: 30000 // Max 30 second backoff
+  };
+
+  // Ratio-based suspicious pool detection
+  private readonly SUSPICIOUS_RATIOS = {
+    EXTREMELY_LOW: 0.001,    // < 0.001 = fake liquidity (1 token : 1000 SOL)
+    EXTREMELY_HIGH: 1000,    // > 1000 = diluted token (1000 tokens : 1 SOL)
+    WARNING_LOW: 0.01,       // < 0.01 = suspicious
+    WARNING_HIGH: 100,       // > 100 = suspicious
+    CRITICAL_LOW: 0.0001,    // < 0.0001 = extremely suspicious
+    CRITICAL_HIGH: 10000     // > 10000 = extremely suspicious
   };
 
   private requestQueue: Array<() => Promise<void>> = [];
@@ -160,17 +190,17 @@ export class LifeguardService implements OnModuleInit {
         return;
       }
 
-      // Check if pool is within the 15-minute monitoring window
+      // Check if pool is within the 30-minute monitoring window
       const poolAge = Date.now() - pool.detected_at;
-      const fifteenMinutes = 15 * 60 * 1000; // 15 minutes in milliseconds
+      const thirtyMinutes = 30 * 60 * 1000; // 30 minutes in milliseconds
       
-      if (poolAge > fifteenMinutes) {
-        this.logger.warn(`Pool ${poolId} is older than 15 minutes (age: ${Math.round(poolAge / 1000 / 60)}m), skipping monitoring`);
+      if (poolAge > thirtyMinutes) {
+        this.logger.warn(`Pool ${poolId} is older than 30 minutes (age: ${Math.round(poolAge / 1000 / 60)}m), skipping monitoring`);
         return;
       }
 
-      // Start monitoring this pool
-      this.logger.log(`🆕 New pool detected: ${poolId} (age: ${Math.round(poolAge / 1000 / 60)}m)`);
+      // Pool is less than 30 minutes old - start monitoring
+      this.logger.log(`🔄 Starting monitoring for pool ${poolId} (age: ${Math.round(poolAge / 1000 / 60)}m)`);
       await this.startMonitoring(pool);
       
     } catch (error) {
@@ -189,20 +219,19 @@ export class LifeguardService implements OnModuleInit {
       for (const pool of pendingPools) {
         const poolAge = now - pool.detected_at;
         const thirtyMinutes = 30 * 60 * 1000; // 30 minutes in milliseconds
-        const fifteenMinutes = 15 * 60 * 1000; // 15 minutes in milliseconds
         
         if (poolAge > thirtyMinutes) {
           // Pool is older than 30 minutes - clean it up
           this.logger.log(`🧹 Cleaning up old pool ${pool.pool_id} (age: ${Math.round(poolAge / 1000 / 60)}m)`);
           await this.positionManagerService.updatePoolAnalysis(pool.pool_id, { analysis_status: 'ignored' });
           cleanedCount++;
-        } else if (poolAge < fifteenMinutes) {
-          // Pool is less than 15 minutes old - start monitoring
+        } else if (poolAge < thirtyMinutes) {
+          // Pool is less than 30 minutes old - start monitoring
           this.logger.log(`🏊‍♂️ Starting monitoring for recent pool ${pool.pool_id} (age: ${Math.round(poolAge / 1000 / 60)}m)`);
           await this.startMonitoring(pool);
           monitoredCount++;
         } else {
-          // Pool is between 15-30 minutes old - skip monitoring but keep in database
+          // Pool is between 30-60 minutes old - skip monitoring but keep in database
           this.logger.log(`⏰ Skipping pool ${pool.pool_id} (age: ${Math.round(poolAge / 1000 / 60)}m) - monitoring window expired`);
         }
       }
@@ -219,12 +248,21 @@ export class LifeguardService implements OnModuleInit {
       return;
     }
 
+    // Check if pool is already being processed
+    if (this.processingPools.has(pool.pool_id)) {
+      this.logger.warn(`Pool ${pool.pool_id} is already being processed for baseline establishment`);
+      return;
+    }
+
+    // Mark pool as being processed
+    this.processingPools.add(pool.pool_id);
+
     try {
-      // Get initial baseline metrics with rate limiting
-      const baselineMetrics = await this.fetchPoolMetricsWithRateLimit(pool.base_vault, pool.quote_vault);
+      // Get initial baseline metrics with retries for new pools
+      const baselineMetrics = await this.establishBaselineWithRetry(pool);
       
       if (!baselineMetrics) {
-        this.logger.warn(`Could not fetch baseline metrics for pool ${pool.pool_id}`);
+        this.logger.warn(`Could not establish baseline metrics for pool ${pool.pool_id} after retries`);
         return;
       }
 
@@ -232,10 +270,10 @@ export class LifeguardService implements OnModuleInit {
       const priority = this.determinePriority(baselineMetrics.tvl);
       const updateInterval = this.calculateUpdateInterval(priority, baselineMetrics.tvl);
 
-      // Calculate remaining monitoring time (15 minutes from detection)
+      // Calculate remaining monitoring time (30 minutes from detection)
       const poolAge = Date.now() - pool.detected_at;
-      const fifteenMinutes = 15 * 60 * 1000; // 15 minutes in milliseconds
-      const remainingTime = Math.max(0, fifteenMinutes - poolAge);
+      const thirtyMinutes = 30 * 60 * 1000; // 30 minutes in milliseconds
+      const remainingTime = Math.max(0, thirtyMinutes - poolAge);
 
       if (remainingTime <= 0) {
         this.logger.warn(`Pool ${pool.pool_id} monitoring window has expired, skipping`);
@@ -248,27 +286,33 @@ export class LifeguardService implements OnModuleInit {
         quoteVault: pool.quote_vault,
         baselineRatio: baselineMetrics.reserveRatio,
         baselineTVL: baselineMetrics.tvl,
-        baselinePrice: baselineMetrics.quoteReserve / baselineMetrics.baseReserve,
+        baselinePrice: baselineMetrics.priceInSOL,
         startTime: Date.now(),
         lastUpdate: Date.now(),
         priority,
         updateInterval,
         consecutiveErrors: 0,
         timeoutId: setTimeout(() => this.stopMonitoring(pool.pool_id), remainingTime),
-        lastPrice: baselineMetrics.quoteReserve / baselineMetrics.baseReserve,
-        lastTVL: baselineMetrics.tvl
+        lastPrice: baselineMetrics.priceInSOL,
+        lastTVL: baselineMetrics.tvl,
+        ratioWarningLogged: false,
+        decimals_a: pool.decimals_a,
+        decimals_b: pool.decimals_b
       };
 
       this.monitoredPools.set(pool.pool_id, monitor);
 
       // Log baseline with priority info and remaining time
-      this.logger.log(`🏊‍♂️ Started monitoring pool ${pool.pool_id} | Priority: ${priority} | Interval: ${updateInterval}ms | Remaining: ${Math.round(remainingTime / 1000 / 60)}m | Baseline: ${baselineMetrics.reserveRatio.toFixed(6)} ratio, ${(baselineMetrics.quoteReserve / baselineMetrics.baseReserve).toFixed(8)} SOL price, ${baselineMetrics.tvl.toFixed(2)} TVL`);
+      this.logger.log(`🏊‍♂️ Started monitoring pool ${pool.pool_id} | Priority: ${priority} | Interval: ${updateInterval}ms | Remaining: ${Math.round(remainingTime / 1000 / 60)}m | Baseline: ${baselineMetrics.reserveRatio.toFixed(6)} ratio, ${baselineMetrics.priceInSOL.toFixed(8)} SOL price, ${baselineMetrics.tvl.toFixed(2)} TVL`);
 
       // Add to batch update system
       this.scheduleBatchUpdate(pool.pool_id, updateInterval);
 
     } catch (error) {
       this.logger.error(`Error starting monitoring for pool ${pool.pool_id}:`, error);
+    } finally {
+      // Always remove from processing set
+      this.processingPools.delete(pool.pool_id);
     }
   }
 
@@ -387,31 +431,71 @@ export class LifeguardService implements OnModuleInit {
     if (!monitor) return;
 
     try {
-      const currentMetrics = await this.fetchPoolMetricsWithRateLimit(monitor.baseVault, monitor.quoteVault);
+      const currentMetrics = await this.fetchPoolMetricsWithRateLimit(monitor.baseVault, monitor.quoteVault, monitor.decimals_a, monitor.decimals_b);
       
       if (currentMetrics) {
-        // Calculate base token price in SOL (quoteReserve / baseReserve)
-        const currentPrice = currentMetrics.quoteReserve / currentMetrics.baseReserve;
-        
         // Calculate price change percentage using stored baseline price
-        const priceChangePercent = ((currentPrice - monitor.baselinePrice) / monitor.baselinePrice) * 100;
+        const priceChangePercent = ((currentMetrics.priceInSOL - monitor.baselinePrice) / monitor.baselinePrice) * 100;
         
         // TVL is in SOL (quoteReserve)
-        const tvlSOL = currentMetrics.quoteReserve;
+        const tvlSOL = currentMetrics.tvl;
         const baselineTVLSOL = monitor.baselineTVL; // This is already in SOL
         
         // TVL change percentage
         const tvlChangePercent = ((tvlSOL - baselineTVLSOL) / baselineTVLSOL) * 100;
 
-        // 🚨 NEW: Check if pool is dead (TVL below -90%)
-        if (tvlChangePercent <= -90) {
-          this.logger.warn(`💀 Pool ${poolId} is DEAD (TVL: ${tvlChangePercent.toFixed(2)}%). Stopping monitoring.`);
+        // 🚨 NEW: Early rug detection - stop monitoring if TVL drops more than 30% below baseline
+        if (tvlChangePercent <= -30) {
+          this.logger.warn(`💀 RUG DETECTED! Pool ${poolId} TVL dropped ${tvlChangePercent.toFixed(2)}% below baseline. Stopping monitoring.`);
           this.stopMonitoring(poolId, 'dead');
           return; // Exit early, no more updates
         }
 
+        // 🚨 NEW: Suspicious ratio grace period logic
+        const currentRatio = currentMetrics.reserveRatio;
+        let ratioAlert = '';
+        const now = Date.now();
+        const isCriticalRatio =
+          currentRatio <= this.SUSPICIOUS_RATIOS.CRITICAL_LOW ||
+          currentRatio >= this.SUSPICIOUS_RATIOS.CRITICAL_HIGH ||
+          currentRatio <= this.SUSPICIOUS_RATIOS.EXTREMELY_LOW ||
+          currentRatio >= this.SUSPICIOUS_RATIOS.EXTREMELY_HIGH;
+
+        if (isCriticalRatio) {
+          if (!monitor.ratioGraceStart) {
+            // First time detecting suspicious ratio
+            monitor.ratioGraceStart = now;
+            monitor.ratioGraceRetries = 0;
+            this.logger.warn(`⏳ Suspicious ratio detected for pool ${poolId} (${currentRatio.toFixed(6)}). Starting 60s grace period...`);
+          } else {
+            const timeSinceStart = now - monitor.ratioGraceStart;
+            const sixtySeconds = 60 * 1000;
+            
+            // Check if 60 seconds have passed - kill the pool
+            if (timeSinceStart >= sixtySeconds) {
+              this.logger.warn(`🚨 CRITICAL SUSPICIOUS RATIO! Pool ${poolId} ratio: ${currentRatio.toFixed(6)}. Killing monitoring after 60s grace period.`);
+              this.stopMonitoring(poolId, 'dead');
+              return;
+            }
+            // If less than 60 seconds have passed, silently continue monitoring
+          }
+        } else {
+          // Ratio returned to normal - log success and reset grace period
+          if (monitor.ratioGraceStart) {
+            const timeSinceStart = now - monitor.ratioGraceStart;
+            this.logger.log(`✅ Pool ${poolId} ratio normalized after ${Math.round(timeSinceStart / 1000)}s grace period. Continuing monitoring.`);
+          }
+          // Reset grace period
+          monitor.ratioGraceStart = undefined;
+          monitor.ratioGraceRetries = undefined;
+        }
+
+        if (ratioAlert && monitor.ratioWarningLogged) {
+          this.logger.warn(ratioAlert);
+        }
+
         // Check if there's a significant change since last update (0.1% threshold)
-        const priceChangeSinceLast = Math.abs((currentPrice - monitor.lastPrice) / monitor.lastPrice) * 100;
+        const priceChangeSinceLast = Math.abs((currentMetrics.priceInSOL - monitor.lastPrice) / monitor.lastPrice) * 100;
         const tvlChangeSinceLast = Math.abs((tvlSOL - monitor.lastTVL) / monitor.lastTVL) * 100;
         const hasSignificantChange = priceChangeSinceLast > 0.1 || tvlChangeSinceLast > 0.1;
 
@@ -427,11 +511,11 @@ export class LifeguardService implements OnModuleInit {
           const priorityIcon = monitor.priority === 'high' ? '🔥' : monitor.priority === 'medium' ? '⚡' : '💤';
           
           // New format: Price in SOL with percentage change, TVL in SOL
-          console.log(`${priorityIcon} ${priceColor} ${poolId.slice(0, 8)} | Price: ${currentPrice.toFixed(8)} SOL (${priceChangePercent >= 0 ? '+' : ''}${priceChangePercent.toFixed(2)}%) | ${tvlColor} TVL: ${tvlSOL.toFixed(2)} SOL | Ratio: ${currentMetrics.reserveRatio.toFixed(6)}`);
+          console.log(`${priorityIcon} ${priceColor} ${poolId.slice(0, 8)} | Price: ${currentMetrics.priceInSOL.toFixed(8)} SOL (${priceChangePercent >= 0 ? '+' : ''}${priceChangePercent.toFixed(2)}%) | ${tvlColor} TVL: ${tvlSOL.toFixed(2)} SOL | Ratio: ${currentMetrics.reserveRatio.toFixed(6)}`);
         }
 
         // Update last values for next comparison
-        monitor.lastPrice = currentPrice;
+        monitor.lastPrice = currentMetrics.priceInSOL;
         monitor.lastTVL = tvlSOL;
 
         // Store snapshot in database
@@ -439,6 +523,7 @@ export class LifeguardService implements OnModuleInit {
           baseReserve: currentMetrics.baseReserve,
           quoteReserve: currentMetrics.quoteReserve,
           reserveRatio: currentMetrics.reserveRatio,
+          priceInSOL: currentMetrics.priceInSOL,
           tvl: currentMetrics.tvl,
           profitLossPercent: priceChangePercent, // Store price change as profit/loss
           tvlChangePercent,
@@ -497,11 +582,11 @@ export class LifeguardService implements OnModuleInit {
     }
   }
 
-  private async fetchPoolMetricsWithRateLimit(baseVault: string, quoteVault: string): Promise<{ baseReserve: number; quoteReserve: number; reserveRatio: number; tvl: number } | null> {
+  private async fetchPoolMetricsWithRateLimit(baseVault: string, quoteVault: string, decimalsA?: number, decimalsB?: number): Promise<{ baseReserve: number; quoteReserve: number; reserveRatio: number; priceInSOL: number; tvl: number } | null> {
     // Add to rate-limited queue
     return new Promise((resolve) => {
       this.requestQueue.push(async () => {
-        const result = await this.fetchPoolMetrics(baseVault, quoteVault);
+        const result = await this.fetchPoolMetrics(baseVault, quoteVault, decimalsA, decimalsB);
         resolve(result);
       });
       
@@ -509,7 +594,7 @@ export class LifeguardService implements OnModuleInit {
     });
   }
 
-  private async fetchPoolMetrics(baseVault: string, quoteVault: string): Promise<{ baseReserve: number; quoteReserve: number; reserveRatio: number; tvl: number } | null> {
+  private async fetchPoolMetrics(baseVault: string, quoteVault: string, decimalsA?: number, decimalsB?: number): Promise<{ baseReserve: number; quoteReserve: number; reserveRatio: number; priceInSOL: number; tvl: number } | null> {
     try {
       // Fetch account data for both vaults
       const [baseAccount, quoteAccount] = await Promise.all([
@@ -522,25 +607,92 @@ export class LifeguardService implements OnModuleInit {
       }
 
       // Parse token account data to get balances
-      const baseBalance = this.parseTokenAccountBalance(baseAccount.data);
-      const quoteBalance = this.parseTokenAccountBalance(quoteAccount.data);
+      const baseData = this.parseTokenAccountData(baseAccount.data);
+      const quoteData = this.parseTokenAccountData(quoteAccount.data);
 
-      if (baseBalance === null || quoteBalance === null) {
+      if (!baseData || !quoteData) {
         return null;
       }
 
+      // Use provided decimals if available, otherwise fallback to RPC calls
+      let baseDecimals: number;
+      let quoteDecimals: number;
+
+      if (decimalsA !== undefined && decimalsB !== undefined) {
+        // Use provided decimals (most efficient)
+        baseDecimals = decimalsA;
+        quoteDecimals = decimalsB;
+      } else {
+        // Fallback to RPC calls if decimals not provided
+        const [baseDecimalsRpc, quoteDecimalsRpc] = await Promise.all([
+          this.getTokenDecimals(baseData.mint),
+          this.getTokenDecimals(quoteData.mint)
+        ]);
+
+        if (baseDecimalsRpc === null || quoteDecimalsRpc === null) {
+          return null;
+        }
+
+        baseDecimals = baseDecimalsRpc;
+        quoteDecimals = quoteDecimalsRpc;
+      }
+
+      // Convert raw amounts to actual amounts using correct decimals
+      const baseBalance = baseData.amount / Math.pow(10, baseDecimals);
+      const quoteBalance = quoteData.amount / Math.pow(10, quoteDecimals);
+
+      // Reserve ratio: how many base tokens per quote token (baseReserve / quoteReserve)
       const reserveRatio = baseBalance / quoteBalance;
+      
+      // Price in SOL: how much SOL per base token (quoteReserve / baseReserve)
+      const priceInSOL = quoteBalance / baseBalance;
+      
       const tvl = quoteBalance; // TVL is just the quote reserve (SOL amount)
 
       return {
         baseReserve: baseBalance,
         quoteReserve: quoteBalance,
         reserveRatio,
+        priceInSOL,
         tvl
       };
 
     } catch (error) {
       this.logger.error('Error fetching pool metrics:', error);
+      return null;
+    }
+  }
+
+  private parseTokenAccountData(data: Buffer): { amount: number; mint: string } | null {
+    try {
+      // Parse SPL Token Account data structure
+      // Token account layout: mint (32) + owner (32) + amount (8) + delegate (36) + state (1) + is_native (37) + delegated_amount (8) + close_authority (36)
+      
+      // Extract mint address (first 32 bytes)
+      const mintBuffer = data.slice(0, 32);
+      const mint = new PublicKey(mintBuffer).toString();
+      
+      // Extract amount (8 bytes starting at offset 64)
+      const amountBuffer = data.slice(64, 72);
+      const amount = Number(amountBuffer.readBigUInt64LE());
+      
+      return { amount, mint };
+    } catch (error) {
+      return null;
+    }
+  }
+
+  private async getTokenDecimals(mintAddress: string): Promise<number | null> {
+    try {
+      const mintAccount = await this.connection.getAccountInfo(new PublicKey(mintAddress));
+      if (!mintAccount) return null;
+
+      // Parse mint account data to get decimals
+      // Mint account layout: mint_authority (36) + supply (8) + decimals (1) + is_initialized (1) + freeze_authority (36)
+      const decimals = mintAccount.data[44]; // decimals field is at offset 44
+      return decimals;
+    } catch (error) {
+      this.logger.error(`Error fetching decimals for mint ${mintAddress}:`, error);
       return null;
     }
   }
@@ -600,7 +752,7 @@ export class LifeguardService implements OnModuleInit {
         this.logger.log(`🛑 Manually stopped monitoring pool ${poolId}`);
         break;
       default:
-        this.logger.log(`⏰ Stopped monitoring pool ${poolId} (15min monitoring window completed)`);
+        this.logger.log(`⏰ Stopped monitoring pool ${poolId} (30min monitoring window completed)`);
     }
   }
 
@@ -611,6 +763,10 @@ export class LifeguardService implements OnModuleInit {
 
   getMonitoredPools(): string[] {
     return Array.from(this.monitoredPools.keys());
+  }
+
+  getProcessingPools(): string[] {
+    return Array.from(this.processingPools);
   }
 
   async forceStopMonitoring(poolId: string) {
@@ -646,7 +802,9 @@ export class LifeguardService implements OnModuleInit {
         medium: pools.filter(p => p.priority === 'medium').reduce((sum, p) => sum + p.updateInterval, 0) / Math.max(mediumPriority, 1),
         low: pools.filter(p => p.priority === 'low').reduce((sum, p) => sum + p.updateInterval, 0) / Math.max(lowPriority, 1)
       },
-      monitoringWindows: [] // Will be populated in getHealthStatus
+      monitoringWindows: [], // Will be populated in getHealthStatus
+      processingPools: [],
+      processingPoolsCount: 0
     };
   }
 
@@ -705,6 +863,8 @@ export class LifeguardService implements OnModuleInit {
     });
 
     stats.monitoringWindows = poolsWithRemainingTime;
+    stats.processingPools = this.getProcessingPools();
+    stats.processingPoolsCount = this.processingPools.size;
 
     const status = issues.length === 0 ? 'healthy' : 'warning';
     
@@ -803,5 +963,47 @@ export class LifeguardService implements OnModuleInit {
     } catch (error) {
       this.logger.error('❌ Failed to resume monitoring:', error);
     }
+  }
+
+  private async establishBaselineWithRetry(pool: Status6Pool): Promise<{ baseReserve: number; quoteReserve: number; reserveRatio: number; priceInSOL: number; tvl: number } | null> {
+    const poolAge = Date.now() - pool.detected_at;
+    const isVeryNew = poolAge < 60000; // Less than 1 minute old
+    
+    // Adjust retry strategy based on pool age
+    const maxRetries = isVeryNew ? 15 : 10; // More retries for very new pools
+    const retryInterval = isVeryNew ? 20000 : 30000; // Shorter intervals for very new pools
+    const maxWaitTime = isVeryNew ? 8 * 60 * 1000 : 5 * 60 * 1000; // Longer wait for very new pools
+    
+    const startTime = Date.now();
+    let attempt = 0;
+    
+    this.logger.log(`🔄 Starting baseline establishment for pool ${pool.pool_id} (age: ${Math.round(poolAge / 1000 / 60)}m) | Strategy: ${isVeryNew ? 'aggressive' : 'standard'} (${maxRetries} retries, ${retryInterval/1000}s intervals)`);
+    
+    while (attempt < maxRetries && (Date.now() - startTime) < maxWaitTime) {
+      attempt++;
+      
+      this.logger.log(`🔄 Attempt ${attempt}/${maxRetries} to establish baseline for pool ${pool.pool_id} (age: ${Math.round((Date.now() - pool.detected_at) / 1000 / 60)}m)`);
+      
+      try {
+        const metrics = await this.fetchPoolMetricsWithRateLimit(pool.base_vault, pool.quote_vault, pool.decimals_a, pool.decimals_b);
+        
+        if (metrics && metrics.baseReserve > 0 && metrics.quoteReserve > 0) {
+          this.logger.log(`✅ Baseline established for pool ${pool.pool_id} on attempt ${attempt} | Base: ${metrics.baseReserve.toFixed(2)} | Quote: ${metrics.quoteReserve.toFixed(2)} | TVL: ${metrics.tvl.toFixed(2)}`);
+          return metrics;
+        } else {
+          this.logger.log(`⏳ Pool ${pool.pool_id} has no reserves yet (attempt ${attempt}/${maxRetries})`);
+        }
+      } catch (error) {
+        this.logger.warn(`❌ Error fetching metrics for pool ${pool.pool_id} (attempt ${attempt}/${maxRetries}):`, error.message);
+      }
+      
+      // Wait before next attempt (except on last attempt)
+      if (attempt < maxRetries) {
+        await new Promise(resolve => setTimeout(resolve, retryInterval));
+      }
+    }
+    
+    this.logger.warn(`❌ Failed to establish baseline for pool ${pool.pool_id} after ${attempt} attempts over ${Math.round((Date.now() - startTime) / 1000 / 60)}m`);
+    return null;
   }
 } 

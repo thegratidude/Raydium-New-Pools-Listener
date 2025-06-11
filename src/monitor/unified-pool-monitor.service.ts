@@ -70,7 +70,18 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
     try {
       this.logger.log('Starting unified pool monitoring...');
       
-      // Wait for SocketService to be ready
+      // Start background initialization that waits for SocketService
+      this.initializeInBackground();
+      
+    } catch (error) {
+      this.logger.error('Failed to initialize:', error instanceof Error ? error.message : 'Unknown error');
+      throw error;
+    }
+  }
+
+  private async initializeInBackground(): Promise<void> {
+    try {
+      // Wait for SocketService to be ready in background
       await this.waitForSocketService();
       
       // Start logs monitoring for health tracking (silent)
@@ -88,8 +99,8 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
       this.logger.log('🎯 Monitoring: Logs (health) + Status 1 → Individual Status 6 listeners');
       
     } catch (error) {
-      this.logger.error('Failed to initialize:', error instanceof Error ? error.message : 'Unknown error');
-      throw error;
+      this.logger.error('Background initialization failed:', error instanceof Error ? error.message : 'Unknown error');
+      // Don't throw here as this is running in background
     }
   }
 
@@ -193,15 +204,24 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
 
   private async waitForSocketService(): Promise<void> {
     let attempts = 0;
-    while (!this.socketService.isReady() && attempts < 10) {
+    const maxAttempts = 30; // Increased from 10 to 30 seconds
+    
+    this.logger.log('⏳ Waiting for SocketService to be ready...');
+    
+    while (!this.socketService.isReady() && attempts < maxAttempts) {
       await new Promise(resolve => setTimeout(resolve, 1000));
       attempts++;
-      this.logger.log(`Waiting for Socket.IO server... attempt ${attempts}/10`);
+      
+      if (attempts % 5 === 0) {
+        this.logger.log(`⏳ Waiting for SocketService... attempt ${attempts}/${maxAttempts}`);
+      }
     }
 
     if (!this.socketService.isReady()) {
-      throw new Error('Socket.IO server failed to initialize within 10 seconds');
+      throw new Error(`SocketService failed to initialize within ${maxAttempts} seconds`);
     }
+    
+    this.logger.log('✅ SocketService is ready, proceeding with monitoring initialization');
   }
 
   // Logs monitoring for health tracking (SILENT - no logging)

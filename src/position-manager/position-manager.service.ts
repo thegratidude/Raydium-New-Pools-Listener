@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { PositionManagerDB, Status6Pool, PoolSnapshot } from './database/position-manager-db';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 
@@ -7,6 +7,7 @@ export { Status6Pool } from './database/position-manager-db';
 
 @Injectable()
 export class PositionManagerService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(PositionManagerService.name);
   private db: PositionManagerDB;
   private isInitialized = false;
 
@@ -18,13 +19,13 @@ export class PositionManagerService implements OnModuleInit, OnModuleDestroy {
     try {
       await this.db.initialize();
       this.isInitialized = true;
-      console.log('✅ Position Manager Service initialized');
+      this.logger.log('✅ Service initialized successfully');
       
       // Listen for pool_status_6 events
       this.eventEmitter.on('pool_status_6', this.handlePoolStatus6.bind(this));
       
     } catch (error) {
-      console.error('❌ Failed to initialize Position Manager Service:', error);
+      this.logger.error('❌ Failed to initialize service:', error);
       throw error;
     }
   }
@@ -32,18 +33,18 @@ export class PositionManagerService implements OnModuleInit, OnModuleDestroy {
   async onModuleDestroy() {
     if (this.isInitialized) {
       await this.db.close();
-      console.log('✅ Position Manager Service shut down');
+      this.logger.log('✅ Service shut down successfully');
     }
   }
 
   private async handlePoolStatus6(data: any) {
     if (!this.isInitialized) {
-      console.warn('⚠️ Position Manager not initialized, skipping pool storage');
+      this.logger.warn('⚠️ Position Manager not initialized, skipping pool storage');
       return;
     }
 
     try {
-      console.log(`🎯 Processing Status 6 pool: ${data.pool_id}`);
+      this.logger.log(`🎯 Processing Status 6 pool: ${data.pool_id}`);
       const poolData = data.data;
       
       // Extract token information from nested objects if they exist
@@ -65,16 +66,16 @@ export class PositionManagerService implements OnModuleInit, OnModuleDestroy {
       
       const missingFields = requiredFields.filter(item => !item.value);
       if (missingFields.length > 0) {
-        console.error(`❌ Missing required fields for pool ${data.pool_id}:`, missingFields.map(f => f.field));
-        console.error(`❌ Pool data received:`, poolData);
-        console.error(`❌ Extracted token info:`, { tokenAMint, tokenBMint, decimalsA, decimalsB });
+        this.logger.error(`❌ Missing required fields for pool ${data.pool_id}:`, missingFields.map(f => f.field));
+        this.logger.error(`❌ Pool data received:`, poolData);
+        this.logger.error(`❌ Extracted token info:`, { tokenAMint, tokenBMint, decimalsA, decimalsB });
         return;
       }
       
       // Check if pool already exists in database
       const existingPool = await this.db.getStatus6Pool(data.pool_id);
       if (existingPool) {
-        console.log(`ℹ️ Pool ${data.pool_id} already exists in database, skipping duplicate insertion`);
+        this.logger.log(`ℹ️ Pool ${data.pool_id} already exists in database, skipping duplicate insertion`);
         return;
       }
       
@@ -104,12 +105,12 @@ export class PositionManagerService implements OnModuleInit, OnModuleDestroy {
       // Store the pool in the database
       const poolId = await this.db.insertStatus6Pool(status6Pool);
       
-      console.log(`💾 Stored Status 6 pool in database: ${data.pool_id} (ID: ${poolId})`);
-      console.log(`📊 Pool details: ${status6Pool.token_a_mint} / ${status6Pool.token_b_mint}`);
-      console.log(`💰 Fees: ${status6Pool.trade_fee}% trade, ${status6Pool.swap_fee}% swap`);
-      console.log(`📈 Price range: ${status6Pool.price_range_min}x - ${status6Pool.price_range_max}x`);
-      console.log(`🔢 Decimals: ${status6Pool.decimals_a}/${status6Pool.decimals_b}`);
-      console.log(`🎯 Pool opens at: ${new Date(status6Pool.pool_open_time * 1000).toISOString()}`);
+      this.logger.log(`💾 Stored Status 6 pool in database: ${data.pool_id} (ID: ${poolId})`);
+      this.logger.log(`📊 Pool details: ${status6Pool.token_a_mint} / ${status6Pool.token_b_mint}`);
+      this.logger.log(`💰 Fees: ${status6Pool.trade_fee}% trade, ${status6Pool.swap_fee}% swap`);
+      this.logger.log(`📈 Price range: ${status6Pool.price_range_min}x - ${status6Pool.price_range_max}x`);
+      this.logger.log(`🔢 Decimals: ${status6Pool.decimals_a}/${status6Pool.decimals_b}`);
+      this.logger.log(`🎯 Pool opens at: ${new Date(status6Pool.pool_open_time * 1000).toISOString()}`);
       
       // Emit event that pool has been stored
       this.eventEmitter.emit('pool_stored', {
@@ -119,7 +120,7 @@ export class PositionManagerService implements OnModuleInit, OnModuleDestroy {
       });
 
     } catch (error) {
-      console.error(`❌ Failed to store pool ${data.pool_id} in database:`, error);
+      this.logger.error(`❌ Failed to store pool ${data.pool_id} in database:`, error);
       
       // Emit error event
       this.eventEmitter.emit('pool_storage_error', {

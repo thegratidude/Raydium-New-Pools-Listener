@@ -2,7 +2,7 @@ import * as sqlite3 from 'sqlite3';
 import { open, Database } from 'sqlite';
 import * as path from 'path';
 import * as fs from 'fs';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 
 // Simplified types for our database entities
 export interface Status6Pool {
@@ -54,6 +54,7 @@ export interface TradeHistory {
 
 @Injectable()
 export class PositionManagerDB {
+  private readonly logger = new Logger(PositionManagerDB.name);
   private db: Database | null = null;
   private dbPath: string;
 
@@ -144,9 +145,9 @@ CREATE INDEX IF NOT EXISTS idx_trade_history_tx_signature ON trade_history(tx_si
       // Execute the schema
       await this.db.exec(schema);
 
-      console.log(`✅ Position Manager Database initialized at: ${this.dbPath}`);
+      this.logger.log(`✅ Database initialized at: ${this.dbPath}`);
     } catch (error) {
-      console.error('❌ Failed to initialize Position Manager Database:', error);
+      this.logger.error('❌ Failed to initialize database:', error);
       throw error;
     }
   }

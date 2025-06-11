@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
 import { createServer } from 'http';
 import { Express } from 'express';
@@ -7,7 +7,7 @@ import { MarketPressure, PoolBroadcastMessage, PoolReadyMessage, isMarketPressur
 import { FileLoggerService } from '../utils/file-logger.service';
 
 @Injectable()
-export class SocketService implements OnModuleInit, OnModuleDestroy {
+export class SocketService implements OnModuleDestroy {
   private readonly logger = new Logger(SocketService.name);
   private readonly fileLogger = new FileLoggerService();
   private healthCheckInterval: NodeJS.Timeout | null = null;
@@ -153,92 +153,6 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async onModuleInit() {
-    this.logger.log('Initializing SocketService...');
-    this.isServerReady = true;
-    this.logger.log('SocketService initialized');
-  }
-
-  broadcastNewPool(message: PoolBroadcastMessage) {
-    if (!this.isInitialized || !this.server) {
-      this.logger.error('Socket.IO server not started');
-      return;
-    }
-
-    this.logger.log(`📢 Broadcasting new pool: ${message.pool_id}`);
-    this.trackMessage('new_pool');
-    
-    // Log WebSocket new pool event
-    this.fileLogger.logWebSocketEvent('new_pool_broadcast', {
-      pool_id: message.pool_id,
-      base_token: message.data.base_token,
-      quote_token: message.data.quote_token,
-      timestamp: new Date().toISOString()
-    });
-    
-    this.server.emit('new_pool', message);
-  }
-
-  broadcastHealth(uptime: number) {
-    if (!this.isInitialized || !this.server) {
-      return;
-    }
-
-    const now = Date.now();
-    const timeSinceLastCheck = now - this.lastHealthCheck;
-    const messagesPerMinute = timeSinceLastCheck > 0 ? (this.totalMessagesSinceLastCheck / timeSinceLastCheck) * 60000 : 0;
-
-    const message = {
-      timestamp: new Date().toISOString(),
-      uptime,
-      messages_since_last_check: this.totalMessagesSinceLastCheck,
-      messages_per_minute: Math.round(messagesPerMinute),
-      time_since_last_check_ms: timeSinceLastCheck,
-      active_clients: this.clients.size
-    };
-    
-    // Log WebSocket health event (but only occasionally to avoid spam)
-    if (this.totalMessagesSinceLastCheck > 0) {
-      this.fileLogger.logWebSocketEvent('health_broadcast', {
-        uptime: uptime,
-        messages_since_last_check: this.totalMessagesSinceLastCheck,
-        messages_per_minute: Math.round(messagesPerMinute),
-        active_clients: this.clients.size,
-        timestamp: new Date().toISOString()
-      });
-    }
-    
-    // Emit to the pools namespace (for existing clients)
-    this.server.emit('health', message);
-    
-    // The server.emit() should already broadcast to all connected clients
-    // including those in the default namespace
-    
-    // Reset counters for next check
-    this.lastHealthCheck = now;
-    this.totalMessagesSinceLastCheck = 0;
-    this.messageCounts.clear();
-  }
-
-  // Method to track message counts
-  private trackMessage(eventType: string) {
-    this.totalMessagesSinceLastCheck++;
-    const currentCount = this.messageCounts.get(eventType) || 0;
-    this.messageCounts.set(eventType, currentCount + 1);
-  }
-
-  private startHealthChecks() {
-    if (this.healthCheckInterval) {
-      clearInterval(this.healthCheckInterval);
-    }
-
-    let startTime = Date.now();
-    this.healthCheckInterval = setInterval(() => {
-      const uptime = Math.floor((Date.now() - startTime) / 1000);
-      this.broadcastHealth(uptime);
-    }, 10000); // Changed back to 10 seconds
-  }
-
   async onModuleDestroy() {
     this.logger.log('Shutting down SocketService...');
     this.isServerReady = false;
@@ -326,4 +240,84 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
       this.logger.log('Socket service is ready');
     }
   }
-} 
+
+  broadcastNewPool(message: PoolBroadcastMessage) {
+    if (!this.isInitialized || !this.server) {
+      this.logger.error('Socket.IO server not started');
+      return;
+    }
+
+    this.logger.log(`📢 Broadcasting new pool: ${message.pool_id}`);
+    this.trackMessage('new_pool');
+    
+    // Log WebSocket new pool event
+    this.fileLogger.logWebSocketEvent('new_pool_broadcast', {
+      pool_id: message.pool_id,
+      base_token: message.data.base_token,
+      quote_token: message.data.quote_token,
+      timestamp: new Date().toISOString()
+    });
+    
+    this.server.emit('new_pool', message);
+  }
+
+  broadcastHealth(uptime: number) {
+    if (!this.isInitialized || !this.server) {
+      return;
+    }
+
+    const now = Date.now();
+    const timeSinceLastCheck = now - this.lastHealthCheck;
+    const messagesPerMinute = timeSinceLastCheck > 0 ? (this.totalMessagesSinceLastCheck / timeSinceLastCheck) * 60000 : 0;
+
+    const message = {
+      timestamp: new Date().toISOString(),
+      uptime,
+      messages_since_last_check: this.totalMessagesSinceLastCheck,
+      messages_per_minute: Math.round(messagesPerMinute),
+      time_since_last_check_ms: timeSinceLastCheck,
+      active_clients: this.clients.size
+    };
+    
+    // Log WebSocket health event (but only occasionally to avoid spam)
+    if (this.totalMessagesSinceLastCheck > 0) {
+      this.fileLogger.logWebSocketEvent('health_broadcast', {
+        uptime: uptime,
+        messages_since_last_check: this.totalMessagesSinceLastCheck,
+        messages_per_minute: Math.round(messagesPerMinute),
+        active_clients: this.clients.size,
+        timestamp: new Date().toISOString()
+      });
+    }
+    
+    // Emit to the pools namespace (for existing clients)
+    this.server.emit('health', message);
+    
+    // The server.emit() should already broadcast to all connected clients
+    // including those in the default namespace
+    
+    // Reset counters for next check
+    this.lastHealthCheck = now;
+    this.totalMessagesSinceLastCheck = 0;
+    this.messageCounts.clear();
+  }
+
+  // Method to track message counts
+  private trackMessage(eventType: string) {
+    this.totalMessagesSinceLastCheck++;
+    const currentCount = this.messageCounts.get(eventType) || 0;
+    this.messageCounts.set(eventType, currentCount + 1);
+  }
+
+  private startHealthChecks() {
+    if (this.healthCheckInterval) {
+      clearInterval(this.healthCheckInterval);
+    }
+
+    let startTime = Date.now();
+    this.healthCheckInterval = setInterval(() => {
+      const uptime = Math.floor((Date.now() - startTime) / 1000);
+      this.broadcastHealth(uptime);
+    }, 10000); // Changed back to 10 seconds
+  }
+}
