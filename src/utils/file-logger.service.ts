@@ -199,6 +199,15 @@ export class FileLoggerService implements LoggerService {
       'RaydiumLayout': colors.magenta,
       'UnifiedPoolMonitorService': colors.blue,
       'FileLoggerService': colors.green,
+      
+      // Position Manager Services
+      'PoolGateway': colors.cyan,
+      'TradingService': colors.blue,
+      'ArbitrageDetectorService': colors.magenta,
+      'EarlyTradingStrategyService': colors.orange, // Orange as requested
+      'PositionManagerDB': colors.green,
+      'PositionManagerService': colors.cyan,
+      'LifeguardService': colors.red, // Red as requested
     };
 
     return contextColors[context] || colors.white;
