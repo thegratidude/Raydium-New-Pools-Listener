@@ -182,6 +182,12 @@ async def execute_trade(pool_id: str, base_token: str, quote_token: str) -> bool
         # Execute the swap script
         cmd = [
             sys.executable, 
+            "swap/swap_buy_ammv4.py", 
+            pool_id, 
+            str(SOL_AMOUNT), 
+            str(SLIPPAGE)
+        ]
+            sys.executable, 
             'swap/swap_buy_ammv4.py', 
             pool_id
         ]
