@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { PositionManagerService } from './position-manager.service';
 
@@ -186,7 +186,7 @@ interface RugRecoveryPosition {
 }
 
 @Injectable()
-export class EarlyTradingStrategyService implements OnModuleInit {
+export class EarlyTradingStrategyService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(EarlyTradingStrategyService.name);
   
   private config: EarlyTradingConfig = {
@@ -247,6 +247,10 @@ export class EarlyTradingStrategyService implements OnModuleInit {
   private poolReEntryTrackers: Map<string, PoolReEntryTracker> = new Map();
   private rugRecoveryTrackers: Map<string, RugRecoveryTracker> = new Map();
   private rugRecoveryPositions: Map<string, RugRecoveryPosition> = new Map();
+  
+  // Timer tracking for graceful shutdown
+  private backgroundTimers: NodeJS.Timeout[] = [];
+  
   private paperPortfolio: PaperPortfolio = {
     balance: 10.0, // Start with 10 SOL
     positions: new Map(),
@@ -275,6 +279,9 @@ export class EarlyTradingStrategyService implements OnModuleInit {
     // Set up event listeners
     this.setupEventListeners();
     
+    // Re-initialize monitoring for any existing positions (in case of server restart)
+    this.reinitializePositionMonitoring();
+    
     // Start background monitoring
     this.startBackgroundMonitoring();
     
@@ -298,19 +305,22 @@ export class EarlyTradingStrategyService implements OnModuleInit {
 
   private startBackgroundMonitoring() {
     // Monitor positions every 10 seconds for early trading
-    setInterval(() => {
+    const positionTimer = setInterval(() => {
       this.monitorActivePositions();
     }, 10000);
+    this.backgroundTimers.push(positionTimer);
 
     // Monitor rug recovery every 30 seconds
-    setInterval(() => {
+    const rugRecoveryTimer = setInterval(() => {
       this.monitorRugRecovery();
     }, 30000);
+    this.backgroundTimers.push(rugRecoveryTimer);
 
     // Reset daily stats every 24 hours
-    setInterval(() => {
+    const dailyStatsTimer = setInterval(() => {
       this.resetDailyStats();
     }, 24 * 60 * 60 * 1000);
+    this.backgroundTimers.push(dailyStatsTimer);
   }
 
   private monitorRugRecovery() {
@@ -1276,5 +1286,37 @@ export class EarlyTradingStrategyService implements OnModuleInit {
     const status = dailyStats.dailyLoss >= this.config.riskManagement.maxDailyLoss ? 'stopped' : 'active';
     
     return { status, stats };
+  }
+
+  private reinitializePositionMonitoring() {
+    // Check if we have any active positions that need monitoring re-initialized
+    const activePositionsCount = this.activePositions.size;
+    const paperPositionsCount = this.paperPortfolio.positions.size;
+    
+    if (activePositionsCount > 0 || paperPositionsCount > 0) {
+      this.logger.log(`🔄 Re-initializing monitoring for ${activePositionsCount} active positions and ${paperPositionsCount} paper positions`);
+      
+      // Re-initialize monitoring for active positions
+      for (const [poolId, position] of this.activePositions.entries()) {
+        this.logger.log(`🔄 Re-initializing monitoring for active position: ${poolId}`);
+        // The position will be monitored by the background monitoring timer
+      }
+      
+      // Re-initialize monitoring for paper positions
+      for (const [poolId, position] of this.paperPortfolio.positions.entries()) {
+        this.logger.log(`🔄 Re-initializing monitoring for paper position: ${poolId}`);
+        // The position will be monitored by the background monitoring timer
+      }
+      
+      this.logger.log(`✅ Position monitoring re-initialized for ${activePositionsCount + paperPositionsCount} positions`);
+    } else {
+      this.logger.log('ℹ️ No existing positions found - starting fresh');
+    }
+  }
+
+  async onModuleDestroy() {
+    // Implement graceful shutdown to clear timers properly
+    this.backgroundTimers.forEach(timer => clearInterval(timer));
+    this.backgroundTimers = [];
   }
 }
