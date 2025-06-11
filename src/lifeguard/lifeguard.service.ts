@@ -705,6 +705,25 @@ export class LifeguardService implements OnModuleInit {
   }
 
   private stopMonitoring(poolId: string, reason: 'timeout' | 'dead' | 'manual' = 'timeout') {
+    // Patch: Only stop monitoring on rug if rug recovery is NOT enabled
+    if (reason === 'dead') {
+      // Check if EarlyTradingStrategyService has rug recovery enabled
+      const earlyTradingService = this.positionManagerService['earlyTradingService'];
+      if (earlyTradingService && earlyTradingService.config && earlyTradingService.config.rugRecovery && earlyTradingService.config.rugRecovery.enabled) {
+        this.logger.log(`[LifeguardService] 🟠 Rug recovery enabled, skipping stopMonitoring for pool ${poolId}`);
+        // Still emit rug_detected event
+        this.eventEmitter.emit('rug_detected', {
+          pool_id: poolId,
+          reason: 'rug_detection',
+          timestamp: Date.now(),
+          baseline_tvl: this.monitoredPools.get(poolId)?.baselineTVL,
+          baseline_price: this.monitoredPools.get(poolId)?.baselinePrice,
+          last_tvl: this.monitoredPools.get(poolId)?.lastTVL,
+          last_price: this.monitoredPools.get(poolId)?.lastPrice
+        });
+        return;
+      }
+    }
     const monitor = this.monitoredPools.get(poolId);
     if (!monitor) return;
 
