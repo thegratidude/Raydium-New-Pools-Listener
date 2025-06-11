@@ -1176,21 +1176,21 @@ export class EarlyTradingStrategyService implements OnModuleInit, OnModuleDestro
     // This is called every 10 seconds to monitor positions
     // The actual monitoring logic is in checkExitConditions
     
-    // Periodic status update with orange coloring for high visibility
+    // Periodic status update with service name coloring
     const activePositions = this.activePositions.size;
     const paperPositions = this.paperPortfolio.positions.size;
     const totalPositions = activePositions + paperPositions;
     
     if (totalPositions > 0) {
-      // Use orange color for high visibility when positions are active
-      console.log('\x1b[33m%s\x1b[0m', `🟠 [EarlyTradingStrategyService] 📊 ACTIVE POSITIONS: ${totalPositions} (${activePositions} live, ${paperPositions} paper)`);
+      // Use logger for service name coloring
+      this.logger.log(`📊 ACTIVE POSITIONS: ${totalPositions} (${activePositions} live, ${paperPositions} paper)`);
       
       // Show position details
       for (const [poolId, position] of this.activePositions.entries()) {
         const duration = Math.round((Date.now() - position.entryTime) / 1000);
         const pnl = position.totalPnL;
         const pnlPercent = position.totalPnLPercent;
-        console.log('\x1b[33m%s\x1b[0m', `   🟠 Pool: ${poolId.slice(0, 8)}... | Duration: ${duration}s | PnL: ${pnl.toFixed(4)} SOL (${pnlPercent.toFixed(2)}%)`);
+        this.logger.log(`   🟠 Pool: ${poolId.slice(0, 8)}... | Duration: ${duration}s | PnL: ${pnl.toFixed(4)} SOL (${pnlPercent.toFixed(2)}%)`);
       }
       
       for (const [poolId, position] of this.paperPortfolio.positions.entries()) {
@@ -1199,13 +1199,13 @@ export class EarlyTradingStrategyService implements OnModuleInit, OnModuleDestro
         const currentPrice = 0; // We don't have current price in paper positions, so show 0
         const pnl = 0;
         const pnlPercent = 0;
-        console.log('\x1b[33m%s\x1b[0m', `   🟠 PAPER: ${poolId.slice(0, 8)}... | Duration: ${duration}s | Entry: ${position.entryPrice.toFixed(8)} SOL`);
+        this.logger.log(`   🟠 PAPER: ${poolId.slice(0, 8)}... | Duration: ${duration}s | Entry: ${position.entryPrice.toFixed(8)} SOL`);
       }
     } else {
       // Less frequent updates when no positions are active
       const now = Date.now();
       if (!this.lastNoPositionsLog || now - this.lastNoPositionsLog > 60000) { // Log every minute when no positions
-        console.log('\x1b[36m%s\x1b[0m', `🔵 [EarlyTradingStrategyService] 📊 No active positions - monitoring for opportunities...`);
+        this.logger.log(`📊 No active positions - monitoring for opportunities...`);
         this.lastNoPositionsLog = now;
       }
     }
