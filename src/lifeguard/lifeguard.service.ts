@@ -33,6 +33,7 @@ interface PoolMonitor {
   lastTVL: number; // Track last TVL to detect changes
   decimals_a: number; // Base token decimals
   decimals_b: number; // Quote token decimals
+  monitoringTimer: NodeJS.Timeout;
 }
 
 interface PoolMetrics {
@@ -60,7 +61,7 @@ export class LifeguardService implements OnModuleInit {
   private readonly connection: Connection;
   private readonly monitoredPools = new Map<string, PoolMonitor>();
   private readonly MONITORING_DURATION = 30 * 60 * 1000; // 30 minutes in milliseconds
-  private readonly DEFAULT_UPDATE_INTERVAL = 2000; // 2 seconds default
+  private readonly DEFAULT_UPDATE_INTERVAL = 1000; // 1 second default
   private isInitialized = false;
   
   // Track pools currently being processed to avoid duplicate baseline establishment
@@ -283,7 +284,8 @@ export class LifeguardService implements OnModuleInit {
         lastPrice: baselineMetrics.priceInSOL,
         lastTVL: baselineMetrics.tvl,
         decimals_a: pool.decimals_a,
-        decimals_b: pool.decimals_b
+        decimals_b: pool.decimals_b,
+        monitoringTimer: setTimeout(() => this.stopMonitoring(pool.pool_id), remainingTime)
       };
 
       this.monitoredPools.set(pool.pool_id, monitor);

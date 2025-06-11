@@ -12,7 +12,7 @@ interface EarlyTradingConfig {
     successRate: number; // 95% success rate for paper trades
   };
   entryConditions: {
-    minPriceIncrease: number; // 5% minimum price increase
+    minPriceIncrease: number; // 3% minimum price increase (reduced from 5%)
     minTVLIncrease: number; // 10% minimum TVL increase
     maxPoolAge: number; // 30 minutes max pool age
     minBaselineTVL: number; // 10 SOL minimum baseline TVL
@@ -143,7 +143,7 @@ export class EarlyTradingStrategyService implements OnModuleInit {
       successRate: 0.95, // 95% success rate
     },
     entryConditions: {
-      minPriceIncrease: 5, // 5% minimum price increase
+      minPriceIncrease: 3, // 3% minimum price increase (reduced from 5%)
       minTVLIncrease: 10, // 10% minimum TVL increase
       maxPoolAge: 30, // 30 minutes max pool age
       minBaselineTVL: 10, // 10 SOL minimum baseline TVL

@@ -357,7 +357,7 @@ async def connect_to_server():
                 current_time = datetime.now().timestamp()
                 if current_time - last_portfolio_check >= portfolio_check_interval:
                     await check_paper_portfolio()
-                    
+                
             if not running:
                 break
                 

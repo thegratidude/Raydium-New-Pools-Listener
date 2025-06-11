@@ -663,9 +663,9 @@ export class UnifiedPoolMonitorService implements OnModuleInit, OnModuleDestroy 
     this.logger.log(`   🚫 Pools filtered out: ${this.poolsFilteredOut}`);
     this.logger.log(`   📊 Filter ratio: ${this.poolsFilteredOut > 0 ? (this.poolsProcessed / this.poolsFilteredOut * 100).toFixed(2) : 0}% processed`);
     this.logger.log(`   🎯 Pending pools: ${this.pendingPools.size}/${this.config.maxPendingPools}`);
-    
+      
     // Reset message count for next check
-    this.messageCount = 0;
+      this.messageCount = 0;
   }
 
   // NEW: Add individual listener for a specific pool to watch for Status 6

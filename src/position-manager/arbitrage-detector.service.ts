@@ -287,7 +287,7 @@ export class ArbitrageDetectorService implements OnModuleInit {
         
         // Only log every 30 seconds to reduce noise
         if (!opportunity.lastProgressLog || secondsSinceLastLog >= 30) {
-          this.logger.log(`📈 OPPORTUNITY PROGRESS: ${opportunity.poolId} | +${profitPercent.toFixed(2)}% profit | ${timeElapsed}m elapsed`);
+        this.logger.log(`📈 OPPORTUNITY PROGRESS: ${opportunity.poolId} | +${profitPercent.toFixed(2)}% profit | ${timeElapsed}m elapsed`);
           opportunity.lastProgressLog = now;
         }
       }
@@ -386,4 +386,4 @@ export class ArbitrageDetectorService implements OnModuleInit {
       this.executeExit(opportunity, reason, `Manual exit: ${reason}`);
     }
   }
-}
+} 
