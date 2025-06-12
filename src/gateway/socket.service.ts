@@ -115,6 +115,22 @@ export class SocketService implements OnModuleDestroy {
             timestamp: new Date().toISOString()
           });
         });
+
+        // Add test connection handler
+        socket.on('test_connection', (data) => {
+          this.logger.log(`🧪 Test connection received from client ${socket.id}: ${JSON.stringify(data)}`);
+          
+          // Send test response back
+          socket.emit('test_response', {
+            server_id: 'nestjs-server',
+            client_id: socket.id,
+            timestamp: new Date().toISOString(),
+            message: 'Server received test connection successfully',
+            received_data: data
+          });
+          
+          this.logger.log(`✅ Sent test response to client ${socket.id}`);
+        });
       });
 
       // Mark as ready

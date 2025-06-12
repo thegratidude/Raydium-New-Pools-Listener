@@ -23,8 +23,8 @@ sio = socketio.AsyncClient(
     reconnection_delay=RECONNECT_DELAY,
     reconnection_delay_max=30,  # max delay between reconnection attempts
     randomization_factor=0.5,  # add some randomization to reconnection delays
-    logger=False,  # disable client-side logging to quiet console
-    engineio_logger=False,  # disable engine.io logging to quiet console
+    logger=True,  # enable client-side logging for debugging
+    engineio_logger=True,  # enable engine.io logging for debugging
 )
 
 # Global flag for graceful shutdown
@@ -134,6 +134,17 @@ async def connect():
     print(f"{Fore.CYAN}⏰ Health updates will be shown once per minute...{Style.RESET_ALL}")
     print(f"{Fore.CYAN}💼 Portfolio status will be checked every 30 seconds...{Style.RESET_ALL}")
     print(f"{Fore.YELLOW}💡 Press Ctrl+C to stop the listener{Style.RESET_ALL}")
+    
+    # Send a test message to verify connection
+    try:
+        await sio.emit('test_connection', {
+            'client_id': sio.sid,
+            'timestamp': datetime.now().isoformat(),
+            'message': 'Python bridge connected and ready'
+        })
+        print(f"{Fore.GREEN}✅ Sent test connection message{Style.RESET_ALL}")
+    except Exception as e:
+        print(f"{Fore.RED}❌ Error sending test message: {e}{Style.RESET_ALL}")
 
 @sio.event
 async def disconnect():
@@ -144,11 +155,53 @@ async def disconnect():
     log_message("DISCONNECT", {"status": "disconnected", "server": SERVER_URL})
     print(f"{Fore.YELLOW}⚠️  Disconnected from server{Style.RESET_ALL}")
 
-@sio.on('pool_status_6')
-async def on_pool_status_6(data):
+@sio.event
+async def message(data):
+    """Catch-all event handler for debugging"""
+    if not running:
+        return
+        
+    print(f"{Fore.RED}🔍 CATCH-ALL EVENT RECEIVED: {data}{Style.RESET_ALL}")
+    log_message("CATCH_ALL", {
+        "data": data,
+        "client_id": sio.sid,
+        "received_at": datetime.now().isoformat()
+    })
+
+@sio.event
+async def any_event(event_name, data):
+    """Handle any event for debugging"""
+    if not running:
+        return
+        
+    print(f"{Fore.BLUE}🔍 ANY EVENT RECEIVED - Event: {event_name}, Data: {data}{Style.RESET_ALL}")
+    log_message("ANY_EVENT", {
+        "event_name": event_name,
+        "data": data,
+        "client_id": sio.sid,
+        "received_at": datetime.now().isoformat()
+    })
+
+@sio.on('test_response')
+async def on_test_response(data):
+    """Handle test response from server"""
+    if not running:
+        return
+        
+    print(f"{Fore.GREEN}✅ TEST RESPONSE RECEIVED: {data}{Style.RESET_ALL}")
+    log_message("TEST_RESPONSE", {
+        "data": data,
+        "client_id": sio.sid,
+        "received_at": datetime.now().isoformat()
+    })
+
+@sio.event
+async def pool_status_6(data):
     """Handle pool status 6 events (NEW Status 6 pools detected)"""
     if not running:
         return
+        
+    print(f"{Fore.MAGENTA}🔍 DEBUG: Received pool_status_6 event with data: {data}{Style.RESET_ALL}")
         
     global NEW_POOL_COUNT
     NEW_POOL_COUNT += 1
@@ -211,9 +264,9 @@ async def on_pool_status_6(data):
         print(f"{Fore.CYAN}AMM Open Orders: {data_obj.get('amm_open_orders', 'N/A')[:8]}...{Style.RESET_ALL}")
         
         # Fee structure
-        trade_fee_num = data_obj.get('trade_fee_numerator', 0)
+        trade_fee_num = data_obj.get('trade_fee', 0)
         trade_fee_den = data_obj.get('trade_fee_denominator', 10000)
-        swap_fee_num = data_obj.get('swap_fee_numerator', 0)
+        swap_fee_num = data_obj.get('swap_fee', 0)
         swap_fee_den = data_obj.get('swap_fee_denominator', 10000)
         
         trade_fee_pct = (trade_fee_num / trade_fee_den * 100) if trade_fee_den > 0 else 0
@@ -231,9 +284,9 @@ async def on_pool_status_6(data):
         print(f"{Fore.YELLOW}Price Range: {min_price_mult:.2f}x - {max_price_mult:.2f}x{Style.RESET_ALL}")
         
         # Pool configuration
-        base_decimals = data_obj.get('base_decimals', 9)
-        quote_decimals = data_obj.get('quote_decimals', 6)
-        depth = data_obj.get('depth', 0)
+        base_decimals = data_obj.get('decimals_a', 9)
+        quote_decimals = data_obj.get('decimals_b', 6)
+        depth = data_obj.get('order_book_depth', 0)
         
         print(f"{Fore.YELLOW}Decimals: {base_decimals}/{quote_decimals}{Style.RESET_ALL}")
         print(f"{Fore.YELLOW}Order Book Depth: {depth}{Style.RESET_ALL}")
@@ -263,8 +316,8 @@ async def on_pool_status_6(data):
             "client_id": sio.sid
         })
 
-@sio.on('pool_ready')
-async def on_pool_ready(data):
+@sio.event
+async def pool_ready(data):
     """Handle pool ready events (pools ready for trading)"""
     if not running:
         return
@@ -299,8 +352,8 @@ async def on_pool_ready(data):
     except Exception as e:
         print(f"{Fore.RED}Error processing pool ready message: {str(e)}{Style.RESET_ALL}")
 
-@sio.on('health')
-async def on_health(data):
+@sio.event
+async def health(data):
     """Handle health check events - only show once per minute"""
     if not running:
         return
@@ -432,8 +485,8 @@ async def check_paper_portfolio():
     except Exception as e:
         print(f"{Fore.RED}Error checking paper portfolio: {e}{Style.RESET_ALL}")
 
-@sio.on('paper_trading_update')
-async def on_paper_trading_update(data):
+@sio.event
+async def paper_trading_update(data):
     """Handle paper trading portfolio updates"""
     if not running:
         return
@@ -473,8 +526,8 @@ async def on_paper_trading_update(data):
     except Exception as e:
         print(f"{Fore.RED}Error processing paper trading update: {str(e)}{Style.RESET_ALL}")
 
-@sio.on('early_position_entered')
-async def on_early_position_entered(data):
+@sio.event
+async def early_position_entered(data):
     """Handle early position entry events"""
     if not running:
         return
@@ -500,8 +553,8 @@ async def on_early_position_entered(data):
     except Exception as e:
         print(f"{Fore.RED}Error processing early position entry: {str(e)}{Style.RESET_ALL}")
 
-@sio.on('early_position_exited')
-async def on_early_position_exited(data):
+@sio.event
+async def early_position_exited(data):
     """Handle early position exit events"""
     if not running:
         return
@@ -529,8 +582,8 @@ async def on_early_position_exited(data):
     except Exception as e:
         print(f"{Fore.RED}Error processing early position exit event: {e}{Style.RESET_ALL}")
 
-@sio.on('arbitrage_opportunity')
-async def on_arbitrage_opportunity(data):
+@sio.event
+async def arbitrage_opportunity(data):
     """Handle arbitrage opportunity events"""
     if not running:
         return

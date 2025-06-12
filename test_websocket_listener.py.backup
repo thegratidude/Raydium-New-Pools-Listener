@@ -203,16 +203,16 @@ async def on_pool_status_6(data):
         print(f"{Fore.CYAN}AMM Open Orders: {data_obj.get('amm_open_orders', 'N/A')[:8]}...{Style.RESET_ALL}")
         
         # Fee structure
-        trade_fee_pct = data_obj.get('trade_fee', 0)
-        # trade_fee_den removed - using calculated percentage
-        swap_fee_pct = data_obj.get('swap_fee', 0)
-        # swap_fee_den removed - using calculated percentage
+        trade_fee_num = data_obj.get('trade_fee_numerator', 0)
+        trade_fee_den = data_obj.get('trade_fee_denominator', 10000)
+        swap_fee_num = data_obj.get('swap_fee_numerator', 0)
+        swap_fee_den = data_obj.get('swap_fee_denominator', 10000)
         
-        # trade_fee_pct already calculated by NestJS
-        # swap_fee_pct already calculated by NestJS
+        trade_fee_pct = (trade_fee_num / trade_fee_den * 100) if trade_fee_den > 0 else 0
+        swap_fee_pct = (swap_fee_num / swap_fee_den * 100) if swap_fee_den > 0 else 0
         
-        print(f"{Fore.YELLOW}Trade Fee: {trade_fee_pct:.3f}%{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}Swap Fee: {swap_fee_pct:.3f}%{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}Trade Fee: {trade_fee_pct:.3f}% ({trade_fee_num}/{trade_fee_den}){Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}Swap Fee: {swap_fee_pct:.3f}% ({swap_fee_num}/{swap_fee_den}){Style.RESET_ALL}")
         
         # Trading parameters
         min_size = data_obj.get('min_size', 0)
@@ -223,9 +223,9 @@ async def on_pool_status_6(data):
         print(f"{Fore.YELLOW}Price Range: {min_price_mult:.2f}x - {max_price_mult:.2f}x{Style.RESET_ALL}")
         
         # Pool configuration
-        base_decimals = data_obj.get('decimals_a', 9)
-        quote_decimals = data_obj.get('decimals_b', 6)
-        depth = data_obj.get('order_book_depth', 0)
+        base_decimals = data_obj.get('base_decimals', 9)
+        quote_decimals = data_obj.get('quote_decimals', 6)
+        depth = data_obj.get('depth', 0)
         
         print(f"{Fore.YELLOW}Decimals: {base_decimals}/{quote_decimals}{Style.RESET_ALL}")
         print(f"{Fore.YELLOW}Order Book Depth: {depth}{Style.RESET_ALL}")

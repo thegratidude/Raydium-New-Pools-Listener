@@ -110,8 +110,20 @@ export class LifeguardService implements OnModuleInit {
       this.handleNewPool(data);
     });
 
+    // 🚀 NEW: Listen for position changes to update monitoring intervals
+    this.eventEmitter.on('early_position_entered', (data: any) => {
+      this.handlePositionChange(data.poolId, true);
+    });
+
+    this.eventEmitter.on('early_position_exited', (data: any) => {
+      this.handlePositionChange(data.poolId, false);
+    });
+
     // Start monitoring existing pending pools
     await this.loadExistingPools();
+    
+    // 🚀 NEW: Start periodic position check
+    this.startPositionCheckTimer();
     
     this.isInitialized = true;
     this.logger.log('✅ Lifeguard Service initialized successfully');
@@ -258,7 +270,7 @@ export class LifeguardService implements OnModuleInit {
 
       // Determine priority and update interval based on TVL
       const priority = this.determinePriority(baselineMetrics.tvl);
-      const updateInterval = this.calculateUpdateInterval(priority, baselineMetrics.tvl);
+      const updateInterval = this.calculateUpdateInterval(priority, baselineMetrics.tvl, pool.pool_id);
 
       // Calculate remaining monitoring time (30 minutes from detection)
       const poolAge = Date.now() - pool.detected_at;
@@ -312,7 +324,14 @@ export class LifeguardService implements OnModuleInit {
     return 'low';
   }
 
-  private calculateUpdateInterval(priority: 'high' | 'medium' | 'low', tvl: number): number {
+  private calculateUpdateInterval(priority: 'high' | 'medium' | 'low', tvl: number, poolId?: string): number {
+    // 🚀 NEW: 500ms monitoring for active positions
+    if (poolId && this.earlyTradingService && this.earlyTradingService.hasActivePosition(poolId)) {
+      this.logger.log(`⚡ Pool ${poolId} has active position - using 500ms monitoring interval`);
+      return 500; // 500ms for active positions
+    }
+    
+    // Existing logic for pools without active positions
     const baseInterval = this.DEFAULT_UPDATE_INTERVAL;
     
     switch (priority) {
@@ -468,7 +487,14 @@ export class LifeguardService implements OnModuleInit {
           // Log concise one-line update with priority indicator
           const priceColor = priceChangePercent >= 0 ? '🟢' : '🔴';
           const tvlColor = tvlChangePercent >= -5 ? '🟢' : '🔴';
-          const priorityIcon = monitor.priority === 'high' ? '🔥' : monitor.priority === 'medium' ? '⚡' : '💤';
+          
+          // 🚀 NEW: Show yellow lightning bolt for 500ms monitoring (active positions)
+          let priorityIcon: string;
+          if (monitor.updateInterval === 500) {
+            priorityIcon = '⚡'; // Yellow lightning bolt for turbo monitoring
+          } else {
+            priorityIcon = monitor.priority === 'high' ? '🔥' : monitor.priority === 'medium' ? '⚡' : '💤';
+          }
           
           // Enhanced format: Show TVL change in SOL units as well as percentage
           const tvlChangeSOL = tvlSOL - baselineTVLSOL;
@@ -537,7 +563,20 @@ export class LifeguardService implements OnModuleInit {
   }
 
   private adjustUpdateInterval(monitor: PoolMonitor, profitLossPercent: number, tvlChangePercent: number) {
-    const baseInterval = this.calculateUpdateInterval(monitor.priority, monitor.baselineTVL);
+    // 🚀 NEW: Check if pool has active position and adjust accordingly
+    const hasActivePosition = this.earlyTradingService && this.earlyTradingService.hasActivePosition(monitor.poolId);
+    
+    if (hasActivePosition) {
+      // Pool has active position - use 500ms monitoring
+      if (monitor.updateInterval !== 500) {
+        monitor.updateInterval = 500;
+        this.logger.log(`⚡ Pool ${monitor.poolId} now has active position - switching to 500ms monitoring`);
+      }
+      return; // Skip other adjustments for active positions
+    }
+    
+    // Existing logic for pools without active positions
+    const baseInterval = this.calculateUpdateInterval(monitor.priority, monitor.baselineTVL, monitor.poolId);
     
     // Increase frequency for high activity
     if (Math.abs(profitLossPercent) > 5 || Math.abs(tvlChangePercent) > 10) {
@@ -862,7 +901,7 @@ export class LifeguardService implements OnModuleInit {
   // Health check method
   async getHealthStatus(): Promise<{ status: string; stats: any; issues: string[] }> {
     const issues: string[] = [];
-    const stats = this.getMonitoringStats();
+    const stats: any = this.getMonitoringStats();
 
     // Check for rate limiting issues
     if (stats.queueStats.requestQueueLength > 50) {
@@ -885,6 +924,20 @@ export class LifeguardService implements OnModuleInit {
       issues.push(`${stalePools.length} pools haven't updated in >30s`);
     }
 
+    // 🚀 NEW: Check 500ms monitoring status
+    const poolsWith500msMonitoring = Array.from(this.monitoredPools.values()).filter(p => p.updateInterval === 500);
+    const poolsWithActivePositions = poolsWith500msMonitoring.filter(p => 
+      this.earlyTradingService && this.earlyTradingService.hasActivePosition(p.poolId)
+    );
+    
+    stats.fastMonitoring = {
+      poolsWith500ms: poolsWith500msMonitoring.length,
+      poolsWithActivePositions: poolsWithActivePositions.length,
+      totalMonitoredPools: this.monitoredPools.size,
+      percentageFastMonitoring: this.monitoredPools.size > 0 ? 
+        Math.round((poolsWith500msMonitoring.length / this.monitoredPools.size) * 100) : 0
+    };
+
     // Add monitoring window information
     const now = Date.now();
     const poolsWithRemainingTime = Array.from(this.monitoredPools.values()).map(monitor => {
@@ -893,7 +946,9 @@ export class LifeguardService implements OnModuleInit {
       return {
         poolId: monitor.poolId,
         remainingMinutes: Math.round(remainingTime / 1000 / 60),
-        priority: monitor.priority
+        priority: monitor.priority,
+        updateInterval: monitor.updateInterval,
+        hasActivePosition: this.earlyTradingService ? this.earlyTradingService.hasActivePosition(monitor.poolId) : false
       };
     });
 
@@ -947,7 +1002,7 @@ export class LifeguardService implements OnModuleInit {
       const newPriority = this.determinePriority(monitor.baselineTVL);
       if (newPriority !== monitor.priority) {
         monitor.priority = newPriority;
-        monitor.updateInterval = this.calculateUpdateInterval(newPriority, monitor.baselineTVL);
+        monitor.updateInterval = this.calculateUpdateInterval(newPriority, monitor.baselineTVL, monitor.poolId);
         optimizations++;
       }
     });
@@ -1056,5 +1111,74 @@ export class LifeguardService implements OnModuleInit {
     this.logger.warn(`   📉 TVL Change: ${tvlChangeSOL >= 0 ? '+' : ''}${tvlChangeSOL.toFixed(2)} SOL (${tvlChangePercent >= 0 ? '+' : ''}${tvlChangePercent.toFixed(2)}%)`);
     this.logger.warn(`   🚨 Rug Detection Threshold: -30% (${(baselineTVL * 0.7).toFixed(2)} SOL)`);
     this.logger.warn(`   🚨 Low TVL Threshold: 50 SOL`);
+  }
+
+  // 🚀 NEW: Handle position changes to update monitoring intervals
+  private handlePositionChange(poolId: string, hasPosition: boolean) {
+    const monitor = this.monitoredPools.get(poolId);
+    if (!monitor) return;
+
+    if (hasPosition) {
+      // Pool now has active position - switch to 500ms monitoring
+      if (monitor.updateInterval !== 500) {
+        monitor.updateInterval = 500;
+        this.logger.log(`⚡ Pool ${poolId} position entered - switching to 500ms monitoring`);
+        
+        // Reschedule next update with new interval
+        this.scheduleBatchUpdate(poolId, 500);
+      }
+    } else {
+      // Pool no longer has active position - revert to normal monitoring
+      const newInterval = this.calculateUpdateInterval(monitor.priority, monitor.baselineTVL, poolId);
+      if (monitor.updateInterval !== newInterval) {
+        monitor.updateInterval = newInterval;
+        this.logger.log(`🔄 Pool ${poolId} position exited - reverting to ${newInterval}ms monitoring`);
+        
+        // Reschedule next update with new interval
+        this.scheduleBatchUpdate(poolId, newInterval);
+      }
+    }
+  }
+
+  // 🚀 NEW: Periodic check for position changes
+  private startPositionCheckTimer() {
+    const checkInterval = 10000; // Check every 10 seconds
+    
+    setInterval(() => {
+      this.checkPositionChanges();
+    }, checkInterval);
+    
+    this.logger.log(`🔄 Starting periodic position check every ${checkInterval/1000}s`);
+  }
+
+  // 🚀 NEW: Check all monitored pools for position changes
+  private checkPositionChanges() {
+    if (!this.earlyTradingService) return;
+
+    let positionChanges = 0;
+    
+    for (const [poolId, monitor] of this.monitoredPools.entries()) {
+      const hasActivePosition = this.earlyTradingService.hasActivePosition(poolId);
+      const currentInterval = monitor.updateInterval;
+      
+      if (hasActivePosition && currentInterval !== 500) {
+        // Pool has position but not using 500ms monitoring
+        monitor.updateInterval = 500;
+        this.logger.log(`⚡ Pool ${poolId} has active position - switching to 500ms monitoring`);
+        this.scheduleBatchUpdate(poolId, 500);
+        positionChanges++;
+      } else if (!hasActivePosition && currentInterval === 500) {
+        // Pool doesn't have position but using 500ms monitoring
+        const newInterval = this.calculateUpdateInterval(monitor.priority, monitor.baselineTVL, poolId);
+        monitor.updateInterval = newInterval;
+        this.logger.log(`🔄 Pool ${poolId} no longer has position - reverting to ${newInterval}ms monitoring`);
+        this.scheduleBatchUpdate(poolId, newInterval);
+        positionChanges++;
+      }
+    }
+    
+    if (positionChanges > 0) {
+      this.logger.log(`🔄 Updated monitoring intervals for ${positionChanges} pools`);
+    }
   }
 }
