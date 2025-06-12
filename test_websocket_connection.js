@@ -4,7 +4,7 @@ const WebSocket = require('ws');
 async function testWebSocket() {
   console.log('🔗 Testing Helius WebSocket connection...');
   
-  const wsUrl = 'wss://mainnet.helius-rpc.com/?api-key=47098f60-a0bc-48ca-9d4d-6cd722281a89';
+  const wsUrl = 'wss://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_API_KEY';
   const ws = new WebSocket(wsUrl);
   
   let messageCount = 0;

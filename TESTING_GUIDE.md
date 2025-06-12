@@ -5,7 +5,7 @@
 ### 1. Environment Setup
 Your `.env` file should contain:
 ```
-HELIUS_API_KEY=47098f60-a0bc-48ca-9d4d-6cd722281a89
+HELIUS_API_KEY=YOUR_HELIUS_API_KEY
 ```
 
 ### 2. Test Methods
