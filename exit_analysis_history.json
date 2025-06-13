@@ -190,5 +190,101 @@
       "total_trades": 100
     },
     "raw_trades_count": 139
+  },
+  {
+    "timestamp": "2025-06-12T06:21:46.818980",
+    "analysis_date": "2025-06-12 06:21:46",
+    "total_completed_trades": 104,
+    "exit_types_found": 5,
+    "exit_type_breakdown": {
+      "TRAILING_STOP_LOSS": 11,
+      "TAKE_PROFIT": 68,
+      "RUG_DETECTION": 12,
+      "STOP_LOSS": 7,
+      "TIMEOUT": 6
+    },
+    "exit_type_stats": {
+      "TRAILING_STOP_LOSS": {
+        "count": 11,
+        "percentage": 10.576923076923077,
+        "avg_pnl": -0.1798909090909091,
+        "avg_pnl_percent": -28.91636363636364,
+        "total_pnl": -1.9788000000000001,
+        "profitable_count": 1,
+        "losing_count": 10,
+        "success_rate": 9.090909090909092,
+        "max_profit": 0.0044999999999999485,
+        "max_loss": -0.3589,
+        "min_pnl": -0.3589,
+        "max_pnl": 0.0044999999999999485
+      },
+      "TAKE_PROFIT": {
+        "count": 68,
+        "percentage": 65.38461538461539,
+        "avg_pnl": 0.1733191176470588,
+        "avg_pnl_percent": 30.14794117647059,
+        "total_pnl": 11.785699999999999,
+        "profitable_count": 60,
+        "losing_count": 8,
+        "success_rate": 88.23529411764706,
+        "max_profit": 0.7518,
+        "max_loss": -0.39980000000000004,
+        "min_pnl": -0.39980000000000004,
+        "max_pnl": 0.7518
+      },
+      "RUG_DETECTION": {
+        "count": 12,
+        "percentage": 11.538461538461538,
+        "avg_pnl": 0.1573333333333333,
+        "avg_pnl_percent": 27.172499999999996,
+        "total_pnl": 1.8879999999999997,
+        "profitable_count": 12,
+        "losing_count": 0,
+        "success_rate": 100.0,
+        "max_profit": 0.7203999999999999,
+        "max_loss": 0.01419999999999999,
+        "min_pnl": 0.01419999999999999,
+        "max_pnl": 0.7203999999999999
+      },
+      "STOP_LOSS": {
+        "count": 7,
+        "percentage": 6.730769230769231,
+        "avg_pnl": -0.1306857142857143,
+        "avg_pnl_percent": -26.13714285714286,
+        "total_pnl": -0.9148000000000001,
+        "profitable_count": 0,
+        "losing_count": 7,
+        "success_rate": 0.0,
+        "max_profit": -0.06890000000000002,
+        "max_loss": -0.2111,
+        "min_pnl": -0.2111,
+        "max_pnl": -0.06890000000000002
+      },
+      "TIMEOUT": {
+        "count": 6,
+        "percentage": 5.769230769230769,
+        "avg_pnl": -0.0715,
+        "avg_pnl_percent": -6.179999999999999,
+        "total_pnl": -0.42899999999999994,
+        "profitable_count": 5,
+        "losing_count": 1,
+        "success_rate": 83.33333333333334,
+        "max_profit": 0.01739999999999997,
+        "max_loss": -0.48719999999999997,
+        "min_pnl": -0.48719999999999997,
+        "max_pnl": 0.01739999999999997
+      }
+    },
+    "overall_performance": {
+      "total_pnl": 10.351099999999999,
+      "avg_pnl_per_trade": 0.09952980769230768,
+      "overall_success_rate": 75.0,
+      "best_single_trade": 0.7518,
+      "worst_single_trade": -0.48719999999999997,
+      "profitable_trades": 78,
+      "losing_trades": 26,
+      "total_trades": 104
+    },
+    "raw_trades_count": 143
   }
 ]

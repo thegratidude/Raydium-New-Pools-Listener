@@ -1,0 +1,45 @@
+{
+  "simulation_date": "2025-06-12T15:41:47.712512",
+  "simulation_parameters": {
+    "current_threshold": 3,
+    "simulated_threshold": 5,
+    "first_entry_take_profit": 25,
+    "reentry_take_profit": 20,
+    "first_entry_stop_loss": 8,
+    "reentry_stop_loss": 6
+  },
+  "results": {
+    "original_performance": {
+      "total_trades": 4,
+      "successful_trades": 0,
+      "success_rate": 0.0,
+      "total_pnl": 0,
+      "current_balance": 9.98,
+      "first_entries": 4,
+      "re_entries": 0,
+      "active_positions": 4
+    },
+    "simulated_performance": {
+      "total_trades": 2,
+      "successful_trades": 0,
+      "success_rate": 0.0,
+      "total_pnl": 0.0,
+      "avg_pnl_per_trade": 0.0,
+      "missed_trades": 2,
+      "missed_successful": 0,
+      "missed_pnl": 0.0,
+      "net_impact": 0.0
+    },
+    "comparison": {
+      "trade_count_change": -2,
+      "trade_count_change_pct": -50.0,
+      "success_rate_change": 0.0,
+      "pnl_change": 0.0,
+      "pnl_change_pct": 0,
+      "avg_pnl_change": 0.0,
+      "missed_opportunity_cost": 0.0
+    },
+    "missed_opportunities": [],
+    "additional_trades": []
+  }
+}
